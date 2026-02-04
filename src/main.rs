@@ -149,6 +149,14 @@ enum Commands {
         /// Page size
         #[arg(long, default_value = "100")]
         page_size: usize,
+        
+        /// Show all results (no limit)
+        #[arg(long, conflicts_with = "limit")]
+        all: bool,
+        
+        /// Limit number of results to display
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
     },
 
     /// List configured accounts
@@ -247,13 +255,11 @@ async fn main() -> Result<()> {
             println!("\nSync complete! Cached {} new messages", total_cached);
         }
 
-        Commands::Search { account, query, server, folder, page, auto_paginate, page_size } => {
+        Commands::Search { account, query, server, folder, page, auto_paginate, page_size, all, limit } => {
             let config = Config::load()?;
             let account_config = config.accounts.get(account).context("Account not found")?;
-
-            let print_message = move |id: &String, from: &Address, subject: &str| {
-                println!("  [{}] {:?} - {}",  id, from.to_string(), subject);
-            };
+            
+            let display_limit = if all { usize::MAX } else { limit };
 
             if server {
                 let backend = init_imap(account_config).await?;
@@ -269,6 +275,7 @@ async fn main() -> Result<()> {
                 if auto_paginate {
                     let mut current_page = 0;
                     let mut total_found = 0;
+                    let mut displayed = 0;
 
                     loop {
                         let envelopes = list_envelopes(&backend, &folder, current_page, page_size, Some(search_query.clone())).await?;
@@ -279,27 +286,34 @@ async fn main() -> Result<()> {
 
                         let is_last_page = envelopes.len() < page_size;
 
-                        println!("Page {} - {} messages:", current_page, envelopes.len());
                         for envelope in &envelopes {
-                            print_message(&envelope.id, &envelope.from, &envelope.subject);
+                            if displayed >= display_limit {
+                                break;
+                            }
+                            println!("  [{}] {:?} - {}", envelope.id, envelope.from, envelope.subject);
+                            displayed += 1;
                         }
 
                         total_found += envelopes.len();
 
-                        if is_last_page {
+                        if displayed >= display_limit || is_last_page {
                             break;
                         }
 
                         current_page += 1;
                     }
 
-                    println!("\nTotal: {} messages", total_found);
+                    println!("\nShowing {} of {} messages", displayed, total_found);
                 } else {
                     let envelopes = list_envelopes(&backend, &folder, page, page_size, Some(search_query)).await?;
 
                     println!("Found {} messages (page {}):", envelopes.len(), page);
-                    for envelope in &envelopes {
-                        print_message(&envelope.id, &envelope.from, &envelope.subject);
+                    for envelope in envelopes.iter().take(display_limit) {
+                        println!("  [{}] {:?} - {}", envelope.id, envelope.from, envelope.subject);
+                    }
+                    
+                    if envelopes.len() > display_limit {
+                        println!("  ... and {} more", envelopes.len() - display_limit);
                     }
                 }
             } else {
@@ -316,12 +330,12 @@ async fn main() -> Result<()> {
                 let results = cache.search_with_query(&search_query, &folder)?;
 
                 println!("Found {} messages in cache:", results.len());
-                for msg in results.iter().take(20) {
-                    print_message(&msg.uid.to_string(), &msg.from_as_address(), &msg.subject);
+                for msg in results.iter().take(display_limit) {
+                    println!("  [{}] {} - {}", msg.uid, msg.from_addr, msg.subject);
                 }
 
-                if results.len() > 20 {
-                    println!("  ... and {} more", results.len() - 20);
+                if results.len() > display_limit {
+                    println!("  ... and {} more", results.len() - display_limit);
                 }
             }
         }
