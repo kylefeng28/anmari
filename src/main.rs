@@ -225,21 +225,13 @@ async fn main() -> Result<()> {
                         .unwrap_or_else(|| Utc::now());
 
                     let full_body = if msg_date > cutoff_date {
+                        // TODO get full message, should be queued in a separate thread probably
                         None
                     } else {
                         None
                     };
 
-                    let cached_msg = CachedMessage {
-                        uid,
-                        folder: folder.clone(),
-                        from: format!("{:?}", envelope.from),
-                        subject: envelope.subject.clone(),
-                        date: msg_date,
-                        body_preview: None,
-                        full_body,
-                        flags: envelope.flags.iter().map(|f| f.to_string()).collect(),
-                    };
+                    let cached_msg = CachedMessage::new(uid, folder.clone(), msg_date, full_body, envelope);
 
                     cache.insert_message(&cached_msg)?;
                     total_cached += 1;
@@ -259,12 +251,8 @@ async fn main() -> Result<()> {
             let config = Config::load()?;
             let account_config = config.accounts.get(account).context("Account not found")?;
 
-            let print_envelope = move |id: &str, from: &Address, subject: &str| {
-                println!("  [{}] {:?} - {}",  id, from, subject);
-            };
-
-            let print_message = move |id: &u32, from: &str, subject: &str| {
-                println!("  [{}] {:?} - {}",  id, from, subject);
+            let print_message = move |id: &String, from: &Address, subject: &str| {
+                println!("  [{}] {:?} - {}",  id, from.to_string(), subject);
             };
 
             if server {
@@ -293,7 +281,7 @@ async fn main() -> Result<()> {
 
                         println!("Page {} - {} messages:", current_page, envelopes.len());
                         for envelope in &envelopes {
-                            print_envelope(&envelope.id, &envelope.from, &envelope.subject);
+                            print_message(&envelope.id, &envelope.from, &envelope.subject);
                         }
 
                         total_found += envelopes.len();
@@ -311,7 +299,7 @@ async fn main() -> Result<()> {
 
                     println!("Found {} messages (page {}):", envelopes.len(), page);
                     for envelope in &envelopes {
-                        print_envelope(&envelope.id, &envelope.from, &envelope.subject);
+                        print_message(&envelope.id, &envelope.from, &envelope.subject);
                     }
                 }
             } else {
@@ -329,7 +317,7 @@ async fn main() -> Result<()> {
 
                 println!("Found {} messages in cache:", results.len());
                 for msg in results.iter().take(20) {
-                    print_message(&msg.uid, &msg.from, &msg.subject);
+                    print_message(&msg.uid.to_string(), &msg.from_as_address(), &msg.subject);
                 }
 
                 if results.len() > 20 {

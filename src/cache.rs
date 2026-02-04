@@ -24,6 +24,7 @@ impl EmailCache {
                 uid INTEGER NOT NULL,
                 folder TEXT NOT NULL,
                 from_addr TEXT NOT NULL,
+                from_name TEXT,
                 subject TEXT NOT NULL,
                 date INTEGER NOT NULL,
                 body_preview TEXT,
@@ -50,12 +51,13 @@ impl EmailCache {
         let flags_json = serde_json::to_string(&msg.flags)?;
         self.conn.execute(
             "INSERT OR REPLACE INTO messages 
-             (uid, folder, from_addr, subject, date, body_preview, full_body, flags)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             (uid, folder, from_addr, from_name, subject, date, body_preview, full_body, flags)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 msg.uid,
                 &msg.folder,
-                &msg.from,
+                &msg.from_addr,
+                &msg.from_name,
                 &msg.subject,
                 msg.date.timestamp(),
                 &msg.body_preview,
@@ -68,22 +70,23 @@ impl EmailCache {
 
     pub fn get_message(&self, uid: u32, folder: &str) -> Result<Option<CachedMessage>> {
         let mut stmt = self.conn.prepare(
-            "SELECT uid, folder, from_addr, subject, date, body_preview, full_body, flags
+            "SELECT uid, folder, from_addr, from_name, subject, date, body_preview, full_body, flags
              FROM messages WHERE uid = ?1 AND folder = ?2",
         )?;
 
         let msg = stmt.query_row(params![uid, folder], |row| {
-            let flags_json: String = row.get(7)?;
+            let flags_json: String = row.get(8)?;
             let flags: Vec<String> = serde_json::from_str(&flags_json).unwrap_or_default();
-            
+
             Ok(CachedMessage {
                 uid: row.get(0)?,
                 folder: row.get(1)?,
-                from: row.get(2)?,
-                subject: row.get(3)?,
-                date: DateTime::from_timestamp(row.get(4)?, 0).unwrap_or_default(),
-                body_preview: row.get(5)?,
-                full_body: row.get(6)?,
+                from_addr: row.get(2)?,
+                from_name: row.get(3)?,
+                subject: row.get(4)?,
+                date: DateTime::from_timestamp(row.get(5)?, 0).unwrap_or_default(),
+                body_preview: row.get(6)?,
+                full_body: row.get(7)?,
                 flags,
             })
         });
@@ -98,24 +101,25 @@ impl EmailCache {
     pub fn search(&self, query: &str) -> Result<Vec<CachedMessage>> {
         let pattern = format!("%{}%", query);
         let mut stmt = self.conn.prepare(
-            "SELECT uid, folder, from_addr, subject, date, body_preview, full_body, flags
+            "SELECT uid, folder, from_addr, from_name, subject, date, body_preview, full_body, flags
              FROM messages 
              WHERE from_addr LIKE ?1 OR subject LIKE ?1 OR body_preview LIKE ?1
              ORDER BY date DESC",
         )?;
 
         let rows = stmt.query_map(params![pattern], |row| {
-            let flags_json: String = row.get(7)?;
+            let flags_json: String = row.get(8)?;
             let flags: Vec<String> = serde_json::from_str(&flags_json).unwrap_or_default();
             
             Ok(CachedMessage {
                 uid: row.get(0)?,
                 folder: row.get(1)?,
-                from: row.get(2)?,
-                subject: row.get(3)?,
-                date: DateTime::from_timestamp(row.get(4)?, 0).unwrap_or_default(),
-                body_preview: row.get(5)?,
-                full_body: row.get(6)?,
+                from_addr: row.get(2)?,
+                from_name: row.get(3)?,
+                subject: row.get(4)?,
+                date: DateTime::from_timestamp(row.get(5)?, 0).unwrap_or_default(),
+                body_preview: row.get(6)?,
+                full_body: row.get(7)?,
                 flags,
             })
         })?;
@@ -150,7 +154,7 @@ impl EmailCache {
 
     pub fn search_by_tag(&self, tag: &str) -> Result<Vec<CachedMessage>> {
         let mut stmt = self.conn.prepare(
-            "SELECT m.uid, m.folder, m.from_addr, m.subject, m.date, m.body_preview, m.full_body, m.flags
+            "SELECT m.uid, m.folder, m.from_addr, m.from_name, m.subject, m.date, m.body_preview, m.full_body, m.flags
              FROM messages m
              JOIN tags t ON m.uid = t.message_uid AND m.folder = t.message_folder
              WHERE t.tag = ?1
@@ -158,17 +162,18 @@ impl EmailCache {
         )?;
 
         let rows = stmt.query_map(params![tag], |row| {
-            let flags_json: String = row.get(7)?;
+            let flags_json: String = row.get(8)?;
             let flags: Vec<String> = serde_json::from_str(&flags_json).unwrap_or_default();
             
             Ok(CachedMessage {
                 uid: row.get(0)?,
                 folder: row.get(1)?,
-                from: row.get(2)?,
-                subject: row.get(3)?,
-                date: DateTime::from_timestamp(row.get(4)?, 0).unwrap_or_default(),
-                body_preview: row.get(5)?,
-                full_body: row.get(6)?,
+                from_addr: row.get(2)?,
+                from_name: row.get(3)?,
+                subject: row.get(4)?,
+                date: DateTime::from_timestamp(row.get(5)?, 0).unwrap_or_default(),
+                body_preview: row.get(6)?,
+                full_body: row.get(7)?,
                 flags,
             })
         })?;
@@ -178,7 +183,7 @@ impl EmailCache {
 
     pub fn search_with_query(&self, query: &SearchEmailsQuery, folder: &str) -> Result<Vec<CachedMessage>> {
         let mut sql = String::from(
-            "SELECT uid, folder, from_addr, subject, date, body_preview, full_body, flags
+            "SELECT uid, folder, from_addr, from_name, subject, date, body_preview, full_body, flags
              FROM messages WHERE folder = ?1"
         );
         
@@ -196,17 +201,18 @@ impl EmailCache {
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         
         let rows = stmt.query_map(param_refs.as_slice(), |row| {
-            let flags_json: String = row.get(7)?;
+            let flags_json: String = row.get(8)?;
             let flags: Vec<String> = serde_json::from_str(&flags_json).unwrap_or_default();
             
             Ok(CachedMessage {
                 uid: row.get(0)?,
                 folder: row.get(1)?,
-                from: row.get(2)?,
-                subject: row.get(3)?,
-                date: DateTime::from_timestamp(row.get(4)?, 0).unwrap_or_default(),
-                body_preview: row.get(5)?,
-                full_body: row.get(6)?,
+                from_addr: row.get(2)?,
+                from_name: row.get(3)?,
+                subject: row.get(4)?,
+                date: DateTime::from_timestamp(row.get(5)?, 0).unwrap_or_default(),
+                body_preview: row.get(6)?,
+                full_body: row.get(7)?,
                 flags,
             })
         })?;
