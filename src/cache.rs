@@ -1,5 +1,6 @@
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
+use email::search_query::{filter::SearchEmailsFilterQuery, SearchEmailsQuery};
 use rusqlite::{params, Connection};
 
 use crate::schema::{CachedMessage, CacheConfig};
@@ -173,6 +174,70 @@ impl EmailCache {
         })?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn search_with_query(&self, query: &SearchEmailsQuery, folder: &str) -> Result<Vec<CachedMessage>> {
+        let mut sql = String::from(
+            "SELECT uid, folder, from_addr, subject, date, body_preview, full_body, flags
+             FROM messages WHERE folder = ?1"
+        );
+        
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(folder.to_string())];
+        
+        // Build WHERE clause from filter
+        if let Some(ref filter) = query.filter {
+            let filter_sql = self.build_filter_sql(filter, &mut params);
+            sql.push_str(&format!(" AND ({})", filter_sql));
+        }
+        
+        sql.push_str(" ORDER BY date DESC");
+        
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            let flags_json: String = row.get(7)?;
+            let flags: Vec<String> = serde_json::from_str(&flags_json).unwrap_or_default();
+            
+            Ok(CachedMessage {
+                uid: row.get(0)?,
+                folder: row.get(1)?,
+                from: row.get(2)?,
+                subject: row.get(3)?,
+                date: DateTime::from_timestamp(row.get(4)?, 0).unwrap_or_default(),
+                body_preview: row.get(5)?,
+                full_body: row.get(6)?,
+                flags,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+    
+    fn build_filter_sql(&self, filter: &SearchEmailsFilterQuery, params: &mut Vec<Box<dyn rusqlite::ToSql>>) -> String {
+        use email::search_query::filter::SearchEmailsFilterQuery::*;
+        
+        match filter {
+            Subject(s) => {
+                params.push(Box::new(format!("%{}%", s)));
+                format!("subject LIKE ?{}", params.len())
+            }
+            From(f) => {
+                params.push(Box::new(format!("%{}%", f)));
+                format!("from_addr LIKE ?{}", params.len())
+            }
+            And(left, right) => {
+                let left_sql = self.build_filter_sql(left, params);
+                let right_sql = self.build_filter_sql(right, params);
+                format!("({} AND {})", left_sql, right_sql)
+            }
+            Or(left, right) => {
+                let left_sql = self.build_filter_sql(left, params);
+                let right_sql = self.build_filter_sql(right, params);
+                format!("({} OR {})", left_sql, right_sql)
+            }
+            _ => "1=1".to_string(), // Unsupported filters default to match all
+        }
     }
 
     pub fn cleanup_old_bodies(&self) -> Result<usize> {

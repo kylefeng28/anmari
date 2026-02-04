@@ -39,30 +39,54 @@ anmari sync --account 0
 
 # Sync specific folder
 anmari sync --folder "Sent"
+
+# Custom page size (default: 100)
+anmari sync --page-size 50
 ```
 
 The sync command:
+- Auto-paginates through all pages
 - Fetches all envelopes (headers) from the folder
 - Stores subject, from, date, and flags in the cache
 - Skips messages already in cache
-- Shows progress every 10 messages
+- Shows progress per page
 
 ### Search emails
 
-Search using notmuch-style query syntax:
+Search the local cache (default) or IMAP server:
 
 ```bash
-# Search by subject
+# Search cache by subject (simple query)
 anmari search "meeting"
 
-# Search by sender (if parser supports it)
-anmari search "from:alice@example.com"
+# Search cache with specific folder
+anmari search --folder "Sent" "invoice"
 
-# Use specific account
-anmari search --account 1 "test"
+# Search on IMAP server (single page)
+anmari search --server "meeting"
+
+# Search server with pagination
+anmari search --server --page 0 "meeting"
+anmari search --server --page 1 "meeting"
+
+# Auto-paginate through all results on server
+anmari search --server --auto-paginate "meeting"
+
+# Custom page size
+anmari search --server --page-size 50 "meeting"
 ```
 
-Note: Currently searches IMAP directly. Cache-based search coming soon.
+**Cache search** (default):
+- Fast local SQLite queries
+- Works offline
+- Searches: subject, from fields
+- Supports basic filters: `Subject`, `From`, `And`, `Or`
+
+**Server search** (with `--server` flag):
+- Queries IMAP directly
+- Always up-to-date
+- Slower, requires connection
+- Supports pagination with `--page` and `--auto-paginate`
 
 ### List accounts
 
