@@ -22,8 +22,34 @@ anmari add-account \
   --email user@example.com \
   --imap-host imap.example.com \
   --imap-port 993 \
-  --cache-days 90
+  --cache-days 90 \
+  --password "your-password"
 ```
+
+### Search emails
+
+Search using notmuch-style query syntax:
+
+```bash
+# Search by subject
+anmari search "subject:meeting"
+
+# Search by sender
+anmari search "from:alice@example.com"
+
+# Combine queries
+anmari search "subject:invoice and from:billing"
+
+# Use specific account (default is 0)
+anmari search --account 1 "subject:test"
+```
+
+Query syntax supports:
+- `subject:text` - Match subject
+- `from:address` - Match sender
+- `to:address` - Match recipient
+- `and` / `or` - Combine filters
+- Date filters and more (see [email-lib docs](https://docs.rs/email-lib/latest/email/search_query/))
 
 ### List accounts
 

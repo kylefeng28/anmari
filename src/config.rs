@@ -10,6 +10,8 @@ pub struct AccountConfig {
     pub imap_port: u16,
     #[serde(default = "default_cache_days")]
     pub cache_days: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
 }
 
 fn default_cache_days() -> u32 {
@@ -57,3 +59,4 @@ impl Config {
         Ok(config_dir.join("anmari").join("config.toml"))
     }
 }
+
