@@ -1,5 +1,6 @@
-use anmari::{AccountConfig, Config};
+use anmari::{AccountConfig, CacheConfig, CachedMessage, Config, EmailCache};
 use anyhow::{Context, Result};
+use chrono::{DateTime, Duration, Utc};
 use clap::{Parser, Subcommand};
 use email::{
     account::config::{passwd::PasswordConfig, AccountConfig as EmailAccountConfig},
@@ -48,6 +49,17 @@ enum Commands {
         password: Option<String>,
     },
     
+    /// Sync emails from IMAP to local cache
+    Sync {
+        /// Account index (from list-accounts)
+        #[arg(short, long, default_value = "0")]
+        account: usize,
+        
+        /// Folder to sync
+        #[arg(short, long, default_value = "INBOX")]
+        folder: String,
+    },
+    
     /// Search emails using notmuch-style queries
     Search {
         /// Account index (from list-accounts)
@@ -91,6 +103,107 @@ async fn main() -> Result<()> {
             config.save()?;
             
             println!("Added account: {}", email);
+        }
+        
+        Commands::Sync { account, folder } => {
+            let config = Config::load()?;
+            
+            let account_config = config
+                .accounts
+                .get(account)
+                .context("Account not found")?;
+            
+            // Initialize cache
+            let cache_config = CacheConfig {
+                db_path: format!("anmari_{}.db", account),
+                cache_days: account_config.cache_days,
+            };
+            let cache = EmailCache::new(cache_config)?;
+            
+            // Build IMAP config
+            let auth = if let Some(ref password) = account_config.password {
+                ImapAuthConfig::Password(PasswordConfig(Secret::new_raw(password.clone())))
+            } else {
+                anyhow::bail!("No password configured for account");
+            };
+            
+            let email_config = Arc::new(EmailAccountConfig {
+                email: account_config.email.clone(),
+                ..Default::default()
+            });
+            
+            let imap_config = Arc::new(ImapConfig {
+                host: account_config.imap_host.clone(),
+                port: account_config.imap_port,
+                encryption: Some(Encryption::Tls(Default::default())),
+                login: account_config.email.clone(),
+                auth,
+                ..Default::default()
+            });
+            
+            let imap_ctx = ImapContextBuilder::new(email_config.clone(), imap_config.clone());
+            let backend = BackendBuilder::new(email_config, imap_ctx)
+                .build()
+                .await?;
+            
+            println!("Syncing {} from {}...", folder, account_config.email);
+            
+            // Fetch all envelopes
+            let envelopes = backend.list_envelopes(
+                &folder,
+                ListEnvelopesOptions {
+                    page: 0,
+                    page_size: 1000,
+                    query: None,
+                },
+            ).await?;
+            
+            println!("Found {} messages", envelopes.len());
+            
+            let cutoff_date = Utc::now() - Duration::days(account_config.cache_days as i64);
+
+            let mut total_cached = 0;
+            for (i, envelope) in envelopes.iter().enumerate() {
+                let uid: u32 = envelope.id.parse().unwrap_or(0);
+                
+                // Check if already cached
+                if cache.get_message(uid, &folder)?.is_some() {
+                    continue;
+                }
+                
+                let msg_date = DateTime::from_timestamp(envelope.date.timestamp(), 0)
+                    .unwrap_or_else(|| Utc::now());
+                
+                // For now, only store headers. Full body fetching can be added later
+                let full_body = if msg_date > cutoff_date {
+                    // TODO: Fetch full body for recent messages
+                    None
+                } else {
+                    None
+                };
+                
+                let cached_msg = CachedMessage {
+                    uid,
+                    folder: folder.clone(),
+                    from: format!("{:?}", envelope.from),
+                    subject: envelope.subject.clone(),
+                    date: msg_date,
+                    body_preview: None,
+                    full_body,
+                    flags: envelope.flags.iter().map(|f| f.to_string()).collect(),
+                };
+                
+                cache.insert_message(&cached_msg)?;
+                total_cached += 1;
+                
+                if (i + 1) % 10 == 0 {
+                    print!("\rCached {}/{} messages", i + 1, envelopes.len());
+                }
+
+            }
+
+            println!("\nSync complete!");
+            print!("\rCached {} new messages out of {} total messages", total_cached, envelopes.len());
         }
         
         Commands::Search { account, query } => {

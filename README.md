@@ -26,30 +26,43 @@ anmari add-account \
   --password "your-password"
 ```
 
+### Sync emails to cache
+
+Fetch emails from IMAP and store in local cache:
+
+```bash
+# Sync default account's INBOX
+anmari sync
+
+# Sync specific account
+anmari sync --account 0
+
+# Sync specific folder
+anmari sync --folder "Sent"
+```
+
+The sync command:
+- Fetches all envelopes (headers) from the folder
+- Stores subject, from, date, and flags in the cache
+- Skips messages already in cache
+- Shows progress every 10 messages
+
 ### Search emails
 
 Search using notmuch-style query syntax:
 
 ```bash
 # Search by subject
-anmari search "subject:meeting"
+anmari search "meeting"
 
-# Search by sender
+# Search by sender (if parser supports it)
 anmari search "from:alice@example.com"
 
-# Combine queries
-anmari search "subject:invoice and from:billing"
-
-# Use specific account (default is 0)
-anmari search --account 1 "subject:test"
+# Use specific account
+anmari search --account 1 "test"
 ```
 
-Query syntax supports:
-- `subject:text` - Match subject
-- `from:address` - Match sender
-- `to:address` - Match recipient
-- `and` / `or` - Combine filters
-- Date filters and more (see [email-lib docs](https://docs.rs/email-lib/latest/email/search_query/))
+Note: Currently searches IMAP directly. Cache-based search coming soon.
 
 ### List accounts
 
