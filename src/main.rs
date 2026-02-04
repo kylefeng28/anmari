@@ -33,12 +33,12 @@ async fn init_imap(account_config: &AccountConfig) -> Result<Backend<ImapContext
     } else {
         anyhow::bail!("No password configured for account");
     };
-    
+
     let email_config = Arc::new(EmailAccountConfig {
         email: account_config.email.clone(),
         ..Default::default()
     });
-    
+
     let imap_config = Arc::new(ImapConfig {
         host: account_config.imap_host.clone(),
         port: account_config.imap_port,
@@ -47,7 +47,7 @@ async fn init_imap(account_config: &AccountConfig) -> Result<Backend<ImapContext
         auth,
         ..Default::default()
     });
-    
+
     let imap_ctx = ImapContextBuilder::new(email_config.clone(), imap_config.clone());
     let backend = BackendBuilder::new(email_config, imap_ctx)
         .build()
@@ -88,30 +88,30 @@ enum Commands {
         /// Email address
         #[arg(short, long)]
         email: String,
-        
+
         /// IMAP host
         #[arg(short = 's', long)]
         imap_host: String,
-        
+
         /// IMAP port
         #[arg(short, long, default_value = "993")]
         imap_port: u16,
-        
+
         /// Days to cache full message bodies
         #[arg(short, long, default_value = "90")]
         cache_days: u32,
-        
+
         /// Password (optional)
         #[arg(short = 'w', long)]
         password: Option<String>,
     },
-    
+
     /// Sync emails from IMAP to local cache
     Sync {
         /// Account index (from list-accounts)
         #[arg(short, long, default_value = "0")]
         account: usize,
-        
+
         /// Folder to sync
         #[arg(short, long, default_value = "INBOX")]
         folder: String,
@@ -120,40 +120,40 @@ enum Commands {
         #[arg(long, default_value = "100")]
         page_size: usize,
     },
-    
+
     /// Search emails using notmuch-style queries
     Search {
         /// Account index (from list-accounts)
         #[arg(short, long, default_value = "0")]
         account: usize,
-        
+
         /// Search query (e.g., "subject:test and from:example.com")
         query: String,
-        
+
         /// Search on server instead of local cache
         #[arg(short, long)]
         server: bool,
-        
+
         /// Folder to search
         #[arg(short, long, default_value = "INBOX")]
         folder: String,
-        
+
         /// Page number (0-indexed)
         #[arg(short, long, default_value = "0")]
         page: usize,
-        
+
         /// Auto-paginate through all pages
         #[arg(long)]
         auto_paginate: bool,
-        
+
         /// Page size
         #[arg(long, default_value = "100")]
         page_size: usize,
     },
-    
+
     /// List configured accounts
     ListAccounts,
-    
+
     /// Show config file path
     ConfigPath,
 }
@@ -161,7 +161,7 @@ enum Commands {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    
+
     match cli.command {
         Commands::AddAccount {
             email,
@@ -171,7 +171,7 @@ async fn main() -> Result<()> {
             password,
         } => {
             let mut config = Config::load()?;
-            
+
             let account = AccountConfig {
                 email: email.clone(),
                 imap_host,
@@ -179,51 +179,57 @@ async fn main() -> Result<()> {
                 cache_days,
                 password,
             };
-            
+
             config.accounts.push(account);
             config.save()?;
-            
+
             println!("Added account: {}", email);
         }
-        
+
         Commands::Sync { account, folder, page_size } => {
             let config = Config::load()?;
             let account_config = config.accounts.get(account).context("Account not found")?;
-            
+
             let cache = init_cache(account, account_config.cache_days)?;
             let backend = init_imap(account_config).await?;
-            
+
             println!("Syncing {} from {}...", folder, account_config.email);
-            
+
             let cutoff_date = Utc::now() - Duration::days(account_config.cache_days as i64);
             let mut page_num = 0;
             let mut total_cached = 0;
-            
+
             loop {
                 let envelopes = list_envelopes(&backend, &folder, page_num, page_size, None).await?;
-                
+
                 if envelopes.is_empty() {
                     break;
                 }
-                
+
                 println!("Processing page {} ({} messages)...", page_num, envelopes.len());
-                
+
+                if envelopes.is_empty() {
+                    break;
+                }
+
+                let is_last_page = envelopes.len() < page_size;
+
                 for envelope in &envelopes {
                     let uid: u32 = envelope.id.parse().unwrap_or(0);
-                    
+
                     if cache.get_message(uid, &folder)?.is_some() {
                         continue;
                     }
-                    
+
                     let msg_date = DateTime::from_timestamp(envelope.date.timestamp(), 0)
                         .unwrap_or_else(|| Utc::now());
-                    
+
                     let full_body = if msg_date > cutoff_date {
                         None
                     } else {
                         None
                     };
-                    
+
                     let cached_msg = CachedMessage {
                         uid,
                         folder: folder.clone(),
@@ -234,17 +240,21 @@ async fn main() -> Result<()> {
                         full_body,
                         flags: envelope.flags.iter().map(|f| f.to_string()).collect(),
                     };
-                    
+
                     cache.insert_message(&cached_msg)?;
                     total_cached += 1;
                 }
-                
+
+                if is_last_page {
+                    break;
+                }
+
                 page_num += 1;
             }
 
             println!("\nSync complete! Cached {} new messages", total_cached);
         }
-        
+
         Commands::Search { account, query, server, folder, page, auto_paginate, page_size } => {
             let config = Config::load()?;
             let account_config = config.accounts.get(account).context("Account not found")?;
@@ -256,10 +266,10 @@ async fn main() -> Result<()> {
             let print_message = move |id: &u32, from: &str, subject: &str| {
                 println!("  [{}] {:?} - {}",  id, from, subject);
             };
-            
+
             if server {
                 let backend = init_imap(account_config).await?;
-                
+
                 let search_query = match query.parse::<SearchEmailsQuery>() {
                     Ok(q) => q,
                     Err(_) => SearchEmailsQuery {
@@ -271,27 +281,34 @@ async fn main() -> Result<()> {
                 if auto_paginate {
                     let mut current_page = 0;
                     let mut total_found = 0;
-                    
+
                     loop {
                         let envelopes = list_envelopes(&backend, &folder, current_page, page_size, Some(search_query.clone())).await?;
-                        
+
                         if envelopes.is_empty() {
                             break;
                         }
-                        
+
+                        let is_last_page = envelopes.len() < page_size;
+
                         println!("Page {} - {} messages:", current_page, envelopes.len());
                         for envelope in &envelopes {
                             print_envelope(&envelope.id, &envelope.from, &envelope.subject);
                         }
-                        
+
                         total_found += envelopes.len();
+
+                        if is_last_page {
+                            break;
+                        }
+
                         current_page += 1;
                     }
-                    
+
                     println!("\nTotal: {} messages", total_found);
                 } else {
                     let envelopes = list_envelopes(&backend, &folder, page, page_size, Some(search_query)).await?;
-                    
+
                     println!("Found {} messages (page {}):", envelopes.len(), page);
                     for envelope in &envelopes {
                         print_envelope(&envelope.id, &envelope.from, &envelope.subject);
@@ -299,7 +316,7 @@ async fn main() -> Result<()> {
                 }
             } else {
                 let cache = init_cache(account, account_config.cache_days)?;
-                
+
                 let search_query = match query.parse::<SearchEmailsQuery>() {
                     Ok(q) => q,
                     Err(_) => SearchEmailsQuery {
@@ -307,23 +324,23 @@ async fn main() -> Result<()> {
                         sort: None,
                     }
                 };
-                
+
                 let results = cache.search_with_query(&search_query, &folder)?;
-                
+
                 println!("Found {} messages in cache:", results.len());
                 for msg in results.iter().take(20) {
                     print_message(&msg.uid, &msg.from, &msg.subject);
                 }
-                
+
                 if results.len() > 20 {
                     println!("  ... and {} more", results.len() - 20);
                 }
             }
         }
-        
+
         Commands::ListAccounts => {
             let config = Config::load()?;
-            
+
             if config.accounts.is_empty() {
                 println!("No accounts configured");
             } else {
@@ -335,13 +352,13 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        
+
         Commands::ConfigPath => {
             let path = Config::config_path()?;
             println!("{}", path.display());
         }
     }
-    
+
     Ok(())
 }
 
