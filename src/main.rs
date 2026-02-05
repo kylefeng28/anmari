@@ -6,7 +6,6 @@ use email::{
     account::config::{passwd::PasswordConfig, AccountConfig as EmailAccountConfig},
     backend::{Backend, BackendBuilder},
     envelope::{
-        Address,
         list::{ListEnvelopes, ListEnvelopesOptions}, Envelope
     },
     imap::{
@@ -204,9 +203,25 @@ async fn main() -> Result<()> {
             println!("Syncing {} from {}...", folder, account_config.email);
 
             let cutoff_date = Utc::now() - Duration::days(account_config.cache_days as i64);
-            let mut page_num = 0;
-            let mut total_cached = 0;
+            let last_seen_uid = cache.get_last_seen_uid(&folder)?;
+            
+            let mut total_new = 0;
+            let mut total_updated = 0;
+            let mut total_expunged = 0;
+            
+            // RFC 4549: Fetch all messages to build UID map and detect changes
+            // email-lib's ListEnvelopes doesn't give a way to specify a fetch range, but RFC 4549
+            // specifies that we should run 2 IMAP commands:
+            //   tag1 UID FETCH <lastseenuid+1>:* <descriptors>
+            //   tag2 UID FETCH 1:<lastseenuid> FLAGS
+            // The second command will allow us to:
+            //   1) update cached flags for old messages;
+            //   2) find out which old messages got expunged; and
+            //   3) build a mapping between message numbers and UIDs (for old messages).
 
+            let mut page_num = 0;
+            let mut all_server_uids = std::collections::HashSet::new();
+            
             loop {
                 let envelopes = list_envelopes(&backend, &folder, page_num, page_size, None).await?;
 
@@ -224,11 +239,22 @@ async fn main() -> Result<()> {
 
                 for envelope in &envelopes {
                     let uid: u32 = envelope.id.parse().unwrap_or(0);
+                    all_server_uids.insert(uid);
+                    
+                    // Check if this is a new message (UID > last_seen_uid)
+                    let is_new = last_seen_uid.map_or(true, |last| uid > last);
 
-                    if cache.get_message(uid, &folder)?.is_some() {
+                    // Check if message exists and update flags if changed
+                    if let Some(cached) = cache.get_message(uid, &folder)? {
+                        let new_flags: Vec<String> = envelope.flags.iter().map(|f| f.to_string()).collect();
+                        if cached.flags != new_flags {
+                            cache.update_flags(uid, &folder, &new_flags)?;
+                            total_updated += 1;
+                        }
                         continue;
                     }
 
+                    // New message - insert it
                     let msg_date = DateTime::from_timestamp(envelope.date.timestamp(), 0)
                         .unwrap_or_else(|| Utc::now());
 
@@ -242,7 +268,9 @@ async fn main() -> Result<()> {
                     let cached_msg = CachedMessage::new(uid, folder.clone(), msg_date, full_body, envelope);
 
                     cache.insert_message(&cached_msg)?;
-                    total_cached += 1;
+                    if is_new {
+                        total_new += 1;
+                    }
                 }
 
                 if is_last_page {
@@ -251,8 +279,20 @@ async fn main() -> Result<()> {
 
                 page_num += 1;
             }
+            
+            // Detect expunged messages (in cache but not on server)
+            if last_seen_uid.is_some() {
+                let cached_uids = cache.get_all_uids(&folder)?;
+                for uid in cached_uids {
+                    if !all_server_uids.contains(&uid) {
+                        cache.delete_message(uid, &folder)?;
+                        total_expunged += 1;
+                    }
+                }
+            }
 
-            println!("\nSync complete! Cached {} new messages", total_cached);
+            println!("\nSync complete! New: {}, Updated: {}, Expunged: {}", 
+                     total_new, total_updated, total_expunged);
         }
 
         Commands::Search { account, query, server, folder, page, auto_paginate, page_size, all, limit } => {

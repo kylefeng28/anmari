@@ -43,7 +43,7 @@
 >          client MUST
 >
 >          * empty the local cache of that mailbox;
->          * "forget" the cached HIGHESTMODSEQ value for the mailbox;
+>          * (if CONDSTORE) "forget" the cached HIGHESTMODSEQ value for the mailbox;
 >          * remove any pending "actions" that refer to UIDs in that
 >            mailbox (note that this doesn't affect actions performed on
 >            client-generated fake UIDs; see Section 5); and
@@ -57,13 +57,31 @@
 >      2) Fetch the current "descriptors";
 >         I)  Discover new messages.
 >         II) Discover changes to old messages and flags for new messages
->             using
->             "FETCH 1:* (FLAGS) (CHANGEDSINCE <cached-value>)" or
->             "SEARCH MODSEQ <cached-value>".
 >
->             Discover expunged messages; for example, using
->             "UID SEARCH 1:<lastseenuid>".  (All messages not returned
->             in this command are expunged.)
+>             IIa) (if CONDSTORE)
+>
+>                "FETCH 1:* (FLAGS) (CHANGEDSINCE <cached-value>)" or
+>                "SEARCH MODSEQ <cached-value>".
+>
+>                Discover expunged messages; for example, using
+>                "UID SEARCH 1:<lastseenuid>".  (All messages not returned
+>                in this command are expunged.)
+>
+>             IIb) (if no CONDSTORE)
+>
+>                tag1 UID FETCH <lastseenuid+1>:* <descriptors>
+>                tag2 UID FETCH 1:<lastseenuid> FLAGS
+>
+>                The first command will request some information about "new" messages
+>                (i.e., messages received by the server since the last
+>                synchronization).  It will also allow the client to build a message
+>                number to UID map (only for new messages).  The second command allows
+>                the client to
+>
+>                   1) update cached flags for old messages;
+>                   2) find out which old messages got expunged; and
+>                   3) build a mapping between message numbers and UIDs (for old
+>                      messages).
 >
 >      3) Fetch the bodies of any "interesting" messages that the client
 >         doesn't already have.

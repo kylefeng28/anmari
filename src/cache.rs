@@ -42,7 +42,13 @@ impl EmailCache {
                 PRIMARY KEY (message_uid, message_folder, tag),
                 FOREIGN KEY (message_uid, message_folder) REFERENCES messages(uid, folder)
             );
-            CREATE INDEX IF NOT EXISTS idx_tag ON tags(tag);",
+            CREATE INDEX IF NOT EXISTS idx_tag ON tags(tag);
+            
+            CREATE TABLE IF NOT EXISTS folder_state (
+                folder TEXT PRIMARY KEY,
+                uidvalidity INTEGER NOT NULL,
+                highestmodseq INTEGER NOT NULL
+            );",
         )?;
         Ok(())
     }
@@ -253,5 +259,71 @@ impl EmailCache {
             params![cutoff.timestamp()],
         )?;
         Ok(affected)
+    }
+    
+    pub fn get_folder_state(&self, folder: &str) -> Result<Option<(u32, u64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT uidvalidity, highestmodseq FROM folder_state WHERE folder = ?1"
+        )?;
+        
+        match stmt.query_row(params![folder], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        }) {
+            Ok(state) => Ok(Some(state)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+    
+    pub fn set_folder_state(&self, folder: &str, uidvalidity: u32, highestmodseq: u64) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO folder_state (folder, uidvalidity, highestmodseq) VALUES (?1, ?2, ?3)",
+            params![folder, uidvalidity, highestmodseq],
+        )?;
+        Ok(())
+    }
+    
+    pub fn clear_folder(&self, folder: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM messages WHERE folder = ?1", params![folder])?;
+        self.conn.execute("DELETE FROM folder_state WHERE folder = ?1", params![folder])?;
+        Ok(())
+    }
+    
+    pub fn update_flags(&self, uid: u32, folder: &str, flags: &[String]) -> Result<()> {
+        let flags_json = serde_json::to_string(flags)?;
+        self.conn.execute(
+            "UPDATE messages SET flags = ?1 WHERE uid = ?2 AND folder = ?3",
+            params![flags_json, uid, folder],
+        )?;
+        Ok(())
+    }
+    
+    pub fn delete_message(&self, uid: u32, folder: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM messages WHERE uid = ?1 AND folder = ?2",
+            params![uid, folder],
+        )?;
+        Ok(())
+    }
+    
+    pub fn get_last_seen_uid(&self, folder: &str) -> Result<Option<u32>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT MAX(uid) FROM messages WHERE folder = ?1"
+        )?;
+        
+        match stmt.query_row(params![folder], |row| row.get(0)) {
+            Ok(uid) => Ok(uid),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+    
+    pub fn get_all_uids(&self, folder: &str) -> Result<Vec<u32>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT uid FROM messages WHERE folder = ?1 ORDER BY uid"
+        )?;
+        
+        let uids = stmt.query_map(params![folder], |row| row.get(0))?;
+        uids.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 }
