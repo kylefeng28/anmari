@@ -1,7 +1,40 @@
 import sqlite3
+from typing import NamedTuple, Optional
+
 
 def get_db_path(account):
     return f"anmari_{account}.db"
+
+
+def normalize_flags_serialize(flags: str | list[str]) -> str:
+    if isinstance(flags, list):
+        flags = ' '.join(sorted(flags))
+    return flags
+
+
+def normalize_flags_deserialize(flags: str) -> list[str]:
+    if flags == '':
+        return []
+    return sorted(flags.split(' '))
+
+class CachedMessage(NamedTuple):
+    uid: int
+    folder: str
+    from_addr: str
+    from_name: Optional[str]
+    subject: str
+    date: int
+    flags: str
+
+    @classmethod
+    def from_row(cls, row):
+        return CachedMessage(**{
+            k: v for k, v in dict(row).items() if k in CachedMessage._fields
+        })
+
+    def get_flags_as_list(self):
+        return normalize_flags_deserialize(self.flags)
+
 
 # Database
 class EmailCache:
@@ -38,28 +71,30 @@ class EmailCache:
         """)
         self.conn.commit()
 
-    def get_message(self, uid: int, folder: str) -> Optional[dict]:
+    def get_message(self, uid: int, folder: str) -> Optional[CachedMessage]:
         """Get cached message"""
         cur = self.conn.execute(
             "SELECT * FROM messages WHERE uid = ? AND folder = ?",
             (uid, folder)
         )
         row = cur.fetchone()
-        return dict(row) if row else None
+        return CachedMessage.from_row(row) if row else None
 
     def insert_message(self, uid: int, folder: str, from_addr: str, from_name: Optional[str],
-                      subject: str, date: int, flags: str):
+                      subject: str, date: int, flags: str | list[str]):
+        flags = normalize_flags_serialize(flags)
         """Insert or replace message"""
         self.conn.execute(
-            """INSERT OR REPLACE INTO messages 
+            """INSERT OR REPLACE INTO messages
                (uid, folder, from_addr, from_name, subject, date, body_preview, full_body, flags)
                VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?)""",
             (uid, folder, from_addr, from_name, subject, date, flags)
         )
         self.conn.commit()
 
-    def update_flags(self, uid: int, folder: str, flags: str):
+    def update_flags(self, uid: int, folder: str, flags: str | list[str]):
         """Update message flags"""
+        flags = normalize_flags_serialize(flags)
         self.conn.execute(
             "UPDATE messages SET flags = ? WHERE uid = ? AND folder = ?",
             (flags, uid, folder)
@@ -96,7 +131,7 @@ class EmailCache:
         pattern = f"%{query}%"
         cur = self.conn.execute(
             """SELECT uid, from_addr, from_name, subject, date, flags
-               FROM messages 
+               FROM messages
                WHERE folder = ? AND (from_addr LIKE ? OR subject LIKE ?)
                ORDER BY date DESC""",
             (folder, pattern, pattern)

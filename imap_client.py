@@ -3,19 +3,19 @@ import email
 from email.header import decode_header
 from email.utils import parseaddr
 from datetime import datetime, timedelta
-from dataclasses import dataclass
+from typing import NamedTuple
 import click
 
-FLAGS = 'FLAGS'
+FLAGS, FLAGS_b = 'FLAGS', b'FLAGS'
 
 # Fetch the message data by UID, including flags and internal date
 #  'RFC822' will read the message body and mark it as read; we don't want this
 # 'RFC822.HEADER' or 'BODY.PEEK[HEADER]' just fetches headers
 # 'RFC822.HEADER' or 'BODY.PEEK[HEADER]' just fetches headers
 BODY_PEEK_HEADER = 'BODY.PEEK[HEADER]'
-BODY_HEADER = 'BODY[HEADER]'
+BODY_HEADER, BODY_HEADER_b = 'BODY[HEADER]', b'BODY[HEADER]'
 
-ENVELOPE = 'ENVELOPE'
+ENVELOPE, ENVELOPE_b = 'ENVELOPE', b'ENVELOPE'
 
 # imaplib reference
 # FETCH by UID: imap.uid('FETCH', uid_str, descriptor) -> status, data
@@ -45,34 +45,28 @@ def decode_if_bytes(maybe_bytes):
 
 
 def parse_flags(data):
-    return [decode_if_bytes(flag) for flag in data[b'FLAGS']]
+    return [decode_if_bytes(flag) for flag in data[FLAGS_b]]
 
 
-def parse_envelope(data, descriptor_name):
-    raw_email = data[descriptor_name.encode()]
-
-    # Parse envelope
-    msg = email.message_from_bytes(raw_email)
-    # Parse email address into (name, addr)
-    from_name, from_addr = parseaddr(msg.get('From', ''))
-    subject = decode_header_value(msg.get('Subject', ''))
-    date_str = msg.get('Date', '')
-
-    # Parse date
-    try:
-        date_tuple = email.utils.parsedate_to_datetime(date_str)
-        date_ts = int(date_tuple.timestamp())
-    except _:
-        date_ts = int(datetime.now().timestamp())
+# Convert imapclient.response_types.Envelope into our own Envelope type
+def parse_envelope(data):
+    envelope_dto = data[ENVELOPE_b]
+    from_ = envelope_dto.from_
+    from_addr, from_name = None, None
+    if from_:
+        from_addr, from_name, = from_[0].host, from_[0].mailbox
+    subject = envelope_dto.subject or ''
+    date_ts = envelope_dto.date
 
     return Envelope(from_name, from_addr, subject, date_ts)
 
-@dataclass
-class Envelope:
-    from_name: str
+
+class Envelope(NamedTuple):
     from_addr: str
+    from_name: str
     subject: str
     date_ts: datetime
+
 
 class EmailImapClient:
     def __init__(self, host, port, email_addr, password, cache):
@@ -91,9 +85,25 @@ class EmailImapClient:
     def get_unread_messages(self):
         return self.client.search('UNSEEN')
 
+
     def get_uids(self, uid_range):
         """Get UIDs in range (e.g., '123:*' or '1:500')"""
-        return self.client.search(f'UID {uid_range}')
+        return self.client.search([f'{uid_range}'])
+
+
+    def fetch_paginate(self, uids: list[int], page_size: int, descriptors: list[str], modifiers: list[str] = None):
+        messages = {}
+
+        uid_pages = [uids[i:i + page_size] for i in range(0, len(uids), page_size)]
+        i = 0
+        print(f'Starting fetch for {len(uids)} items, using page_size={page_size}')
+        for uid_page in uid_pages:
+            print(f'Fetching page {i} ({len(uid_page)} items)')
+            page_messages = self.client.fetch(uid_page, descriptors, modifiers)
+            messages.update(page_messages)
+            i += 1
+
+        return messages
 
     # RFC 4549 sync algorithm
     # https://www.rfc-editor.org/rfc/rfc4549#section-3
@@ -108,10 +118,14 @@ class EmailImapClient:
         # #UID FETCH <lastseenuid+1>:* <descriptors>'
         # TODO print timestamp of last sync
         def _fetch_new_messages():
-            print(f"Step 1: Fetching new messages since last sync (uid {last_seen_uid})")
+            if last_seen_uid:
+                print(f"Step 1: Fetching new messages since last sync (uid {last_seen_uid})")
+                new_last_seen_uid = None
+                new_uid_list = self.get_uids(f'{last_seen_uid+1}:*')
 
-            new_last_seen_uid = None
-            new_uid_list = self.get_uids(f'{last_seen_uid+1}:*')
+            else:
+                print("No cache detected. Starting full sync.")
+                new_uid_list = self.get_uids('ALL')
 
             if len(new_uid_list) > 0:
                 print(f"Found {len(new_uid_list)} new messages.")
@@ -122,15 +136,11 @@ class EmailImapClient:
 
             # Fetch details for each new message
             envelopes = []
-            messages = self.client.fetch(new_uid_list, [FLAGS, BODY_PEEK_HEADER])
+            messages = self.fetch_paginate(new_uid_list, page_size, [FLAGS, ENVELOPE])
 
             for uid, data in messages.items():
-                # Get flags
-                flags = ' '.join(flag.decode() if isinstance(flag, bytes) else str(flag) 
-                               for flag in data[b'FLAGS'])
-
-                # Parse envelope
-                envelope = parse_envelope(data, BODY_HEADER)
+                flags = parse_flags(data)
+                envelope = parse_envelope(data)
                 envelopes.append((uid, flags, envelope))
 
             return envelopes
@@ -148,12 +158,11 @@ class EmailImapClient:
                 print("No old messages to check")
                 return []
 
-            messages = self.client.fetch(old_uid_list, ['FLAGS'])
+            messages = self.client.fetch(old_uid_list, [FLAGS])
 
             results = []
             for uid, data in messages.items():
-                flags = ' '.join(flag.decode() if isinstance(flag, bytes) else str(flag) 
-                               for flag in data[b'FLAGS'])
+                flags = parse_flags(data)
                 results.append((uid, flags))
 
             print(f"Will check {len(results)} old messages that have potentially changed.")
@@ -166,7 +175,7 @@ class EmailImapClient:
         for (uid, flags, envelope) in new_messages:
             cached = self.cache.get_message(uid, folder)
             if not cached:
-                print(f'inserting {uid}')
+                print(f'[debug] inserting {uid}')
                 self.cache.insert_message(
                     uid,
                     folder,
@@ -178,32 +187,27 @@ class EmailImapClient:
                 total_new += 1
         print(f'Added {total_new} new messages to cache')
 
-        old_messages = _fetch_old_messages()
-        total_updated = 0
+        if last_seen_uid:
+            old_messages = _fetch_old_messages()
+            total_updated = 0
 
-        print('Updating cache for old')
-        for (uid, flags) in old_messages:
-            cached = self.cache.get_message(uid, folder)
-            if cached:
-                if cached['flags'] != flags:
-                    print(f"Updating UID {uid} in cache")
-                    print(f"Old flags: {cached['flags']}")
-                    print(f"New flags: {flags}")
+            print('Updating cache for old')
+            for (uid, flags) in old_messages:
+                cached = self.cache.get_message(uid, folder)
+                if cached:
+                    cached_flags = cached.get_flags_as_list()
+                    if cached_flags != flags:
+                        print(f"Updating UID {uid} in cache")
+                        print(f"Old flags: {cached_flags}")
+                        print(f"New flags: {flags}")
 
-                    # self.cache.update_flags(uid, folder, flags)
-                    total_updated += 1
-            else:
-                click.echo(f"UID {uid} not found in cache!")
-                self.cache.insert_message(
-                    uid,
-                    folder,
-                    envelope.from_addr,
-                    envelope.from_name,
-                    envelope.subject,
-                    envelope.date_ts,
-                    flags)
+                        self.cache.update_flags(uid, folder, flags)
+                        total_updated += 1
+                else:
+                    click.echo(f"UID {uid} not found in cache!")
+                    print(flags)
 
-        # # Detect expunged
+        # Detect expunged
         total_expunged = 0
         #     if last_seen_uid:
         #         cached_uids = self.cache.get_all_uids(folder)
@@ -213,4 +217,7 @@ class EmailImapClient:
         #                 total_expunged += 1
 
 
-        print(f"\nSync complete! New: {total_new}, Updated: {total_updated}, Expunged: {total_expunged}")
+        if last_seen_uid:
+            print(f"\nSync complete! New: {total_new}, Updated: {total_updated}, Expunged: {total_expunged}")
+        else:
+            print(f"\nInitial sync complete! New: {total_new}")
