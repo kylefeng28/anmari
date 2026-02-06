@@ -1,9 +1,10 @@
 import re
+import shlex
 from datetime import datetime, timedelta
 import dateparser
 
 
-def parse_search_query(query: str) -> tuple[str, list, bool]:
+def parse_search_query(query: str | list[str]) -> tuple[str, list, bool]:
     """Parse notmuch-style query into SQL WHERE clause
 
     Supports:
@@ -11,7 +12,7 @@ def parse_search_query(query: str) -> tuple[str, list, bool]:
     - from:"text" - Search in from_addr or from_name
     - body:"text" - Search in body_preview
     - tag:tagname - Search by tag
-    - is:read / is:unread - Check read status (based on \Seen flag)
+    - is:read / is:unread - Check read status (based on \\Seen flag)
     - date:<since>..<until> - Date range (e.g., date:2024-01-01..2024-12-31)
     - date:<date> - Specific date or relative (e.g., date:yesterday, date:"1 week ago")
     - AND, OR, NOT operators
@@ -33,9 +34,16 @@ def parse_search_query(query: str) -> tuple[str, list, bool]:
         (conditions, params, has_tag_filter)
     """
 
-    # Tokenize: field:"value", operators, bare words
-    # Updated regex to handle date ranges with ..
-    tokens = re.findall(r'(\w+:"[^"]*"(?:\.\.[^"\s]*)?|\w+:[^\s]+(?:\.\.[^\s]+)?|\bAND\b|\bOR\b|\bNOT\b|\w+)', query)
+    # Use shlex to properly handle quoted strings
+    if isinstance(query, str):
+        try:
+            tokens = shlex.split(query)
+        except ValueError as e:
+            # Fallback to regex if shlex fails
+            print('Could not parse query with shlex, falling back to regex')
+            tokens = re.findall(r'(\w+:"[^"]*"(?:\.\.[^"\s]*)?|\w+:[^\s]+(?:\.\.[^\s]+)?|\bAND\b|\bOR\b|\bNOT\b|\w+)', query)
+    elif isinstance(query, list) or isinstance(query, tuple):
+        tokens = query
 
     if not tokens:
         return "1=1", [], False
@@ -47,9 +55,10 @@ def parse_search_query(query: str) -> tuple[str, list, bool]:
 
     while i < len(tokens):
         token = tokens[i]
+        token_upper = token.upper()
 
         # Handle NOT operator
-        if token == 'NOT':
+        if token_upper == 'NOT':
             i += 1
             if i >= len(tokens):
                 break
@@ -67,14 +76,17 @@ def parse_search_query(query: str) -> tuple[str, list, bool]:
         has_tag_filter = has_tag_filter or is_tag
 
         # Check for AND/OR operator
-        if i + 1 < len(tokens) and tokens[i + 1] in ('AND', 'OR'):
-            conditions.append(tokens[i + 1])
-            i += 2
-        else:
-            i += 1
-            # Implicit AND between terms
-            if i < len(tokens) and tokens[i] not in ('AND', 'OR', 'NOT'):
-                conditions.append('AND')
+        if i + 1 < len(tokens):
+            next_token_upper = tokens[i + 1].upper()
+            if next_token_upper in ('AND', 'OR'):
+                conditions.append(next_token_upper)
+                i += 2
+                continue
+        
+        i += 1
+        # Implicit AND between terms
+        if i < len(tokens) and tokens[i].upper() not in ('AND', 'OR', 'NOT'):
+            conditions.append('AND')
 
     return ' '.join(conditions), params, has_tag_filter
 
@@ -108,18 +120,18 @@ def _parse_token(token: str) -> tuple[str, list, bool]:
     Returns:
         (condition, params, is_tag_filter)
     """
+
     # Field-specific search: field:"value"
     if ':' in token:
         field, value = token.split(':', 1)
 
         # Tag search
         if field == 'tag':
-            value = value.strip('"')
             return "t.tag = ?", [value], True
 
         # Read/unread status
         if field == 'is':
-            value = value.strip('"').lower()
+            value = value.lower()
             if value == 'read':
                 return "m.flags LIKE ?", ['%\\Seen%'], False
             elif value == 'unread':
@@ -147,7 +159,7 @@ def _parse_token(token: str) -> tuple[str, list, bool]:
             since_date = _parse_date(value)
             return "m.date >= ?", [since_date], False
 
-        value = value.strip('"')
+        # shlex already removed quotes, so don't strip them again
         pattern = f"%{value}%"
 
         if field == 'subject':

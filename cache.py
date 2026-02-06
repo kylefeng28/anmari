@@ -154,7 +154,7 @@ class EmailCache:
         )
         return [row[0] for row in cur.fetchall()]
 
-    def search(self, folder: str, query: str) -> List[CachedMessage]:
+    def search(self, folder: str, query: str | list[str]) -> List[CachedMessage]:
         conditions, params, has_tag_filter = parse_search_query(query)
 
         # If query includes tag filter, join with tags table

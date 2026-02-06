@@ -44,8 +44,8 @@ def sync(account: int, folder: str, page_size: int):
 @click.option('--folder', '-f', default='INBOX', help='Folder to search')
 @click.option('--limit', '-l', default=20, help='Limit results')
 @click.option('--all', is_flag=True, help='Show all results')
-@click.argument('query')
-def search(account: int, folder: str, limit: int, all: bool, query: str):
+@click.argument('query', nargs=-1, required=True)
+def search(account: int, folder: str, limit: int, all: bool, query: tuple):
     """Search emails in local cache"""
     config = AccountConfig(account)
 
@@ -84,12 +84,15 @@ def repl():
 def tag(account: int, folder: str, tags_and_query: tuple):
     """Apply local tags to messages matching a query
 
-    Usage: tag +tag1 +tag2 -tag3 <query>
+    Usage: tag [--] +tag1 -tag2 <query>
 
     Examples:
       tag +newsletter from:Instagram
       tag +important -inbox subject:meeting
-      tag -spam +inbox from:boss
+      tag -- -spam +inbox from:boss
+      tag -- -actionable +reference from:"Bank of America" subject:"transaction exceeds"
+    
+    Note: Use -- before query if it starts with - to prevent option parsing.
     """
     config = AccountConfig(account)
     cache = EmailCache(account, config.get('cache_days', 90))
@@ -115,12 +118,10 @@ def tag(account: int, folder: str, tags_and_query: tuple):
         click.echo("Error: No search query specified", err=True)
         return
 
-    query = ' '.join(query_parts)
-
-    msgs = cache.search(folder, query)
+    search_results = cache.search(folder, query_parts)
 
     # Apply tags
-    count = cache.tag_messages(msgs, tags_to_add, tags_to_remove or None)
+    count = cache.tag_messages(search_results, tags_to_add, tags_to_remove or None)
 
     add_str = f"+{', +'.join(tags_to_add)}" if tags_to_add else ""
     remove_str = f"-{', -'.join(tags_to_remove)}" if tags_to_remove else ""
