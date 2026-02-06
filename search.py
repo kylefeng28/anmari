@@ -111,12 +111,12 @@ def _parse_token(token: str) -> tuple[str, list, bool]:
     # Field-specific search: field:"value"
     if ':' in token:
         field, value = token.split(':', 1)
-        
+
         # Tag search
         if field == 'tag':
             value = value.strip('"')
             return "t.tag = ?", [value], True
-        
+
         # Read/unread status
         if field == 'is':
             value = value.strip('"').lower()

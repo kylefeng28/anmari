@@ -49,16 +49,30 @@ def parse_envelope(data):
     from_ = str(envelope_dto.from_[0])
     from_name, from_addr, = parseaddr(from_)
     subject = envelope_dto.subject or ''
-    date_ts = envelope_dto.date
+    date = envelope_dto.date
 
-    return Envelope(from_name, from_addr, subject, date_ts)
+    return Envelope(from_addr, from_name, subject, date)
+
+
+# Convert imapclient.response_types.Envelope into our own Envelope type
+def parse_header(data):
+    # Parse envelope
+    msg = email.message_from_bytes(data[BODY_HEADER_b])
+    # Parse email address into (name, addr)
+    from_name, from_addr = parseaddr(msg.get('From', ''))
+    subject = decode_header_value(msg.get('Subject', ''))
+    date_str = msg.get('Date', '')
+
+    # Parse date
+    date = email.utils.parsedate_to_datetime(date_str)
+    return Envelope(from_addr, from_name, subject, date)
 
 
 class Envelope(NamedTuple):
     from_addr: str
     from_name: str
     subject: str
-    date_ts: datetime
+    date: datetime
 
 
 class EmailImapClient:
@@ -149,11 +163,13 @@ class EmailImapClient:
                 return []
 
             # Fetch details for each new message
-            for messages in self.fetch_paginate(new_uid_list, page_size, [FLAGS, ENVELOPE]):
+            # for messages in self.fetch_paginate(new_uid_list, page_size, [FLAGS, ENVELOPE]):
+            for messages in self.fetch_paginate(new_uid_list, page_size, [FLAGS, BODY_PEEK_HEADER]):
                 envelopes = []
                 for uid, data in messages.items():
                     flags = parse_flags(data)
-                    envelope = parse_envelope(data)
+                    # envelope = parse_envelope(data)
+                    envelope = parse_header(data)
                     envelopes.append((uid, flags, envelope))
 
                 yield envelopes
@@ -217,7 +233,7 @@ class EmailImapClient:
                         envelope.from_addr,
                         envelope.from_name,
                         envelope.subject,
-                        envelope.date_ts,
+                        envelope.date,
                         flags)
                     new += 1
 
