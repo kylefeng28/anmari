@@ -76,6 +76,16 @@ class EmailCache:
                 uidvalidity INTEGER NOT NULL,
                 highestmodseq INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS tags (
+                uid INTEGER NOT NULL,
+                folder TEXT NOT NULL,
+                tag TEXT NOT NULL,
+                PRIMARY KEY (uid, folder, tag),
+                FOREIGN KEY (uid, folder) REFERENCES messages(uid, folder) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
+            CREATE INDEX IF NOT EXISTS idx_tags_message ON tags(uid, folder);
         """)
         self.conn.commit()
 
@@ -135,12 +145,20 @@ class EmailCache:
         return [row[0] for row in cur.fetchall()]
 
     def search(self, folder: str, query: str) -> List[CachedMessage]:
-        conditions, params = parse_search_query(query)
+        conditions, params, has_tag_filter = parse_search_query(query)
 
-        sql = f"""SELECT *
-                  FROM messages
-                  WHERE folder = ? AND ({conditions})
-                  ORDER BY date DESC"""
+        # If query includes tag filter, join with tags table
+        if has_tag_filter:
+            sql = f"""SELECT DISTINCT m.*
+                      FROM messages m
+                      LEFT JOIN tags t ON m.uid = t.uid AND m.folder = t.folder
+                      WHERE m.folder = ? AND ({conditions})
+                      ORDER BY m.date DESC"""
+        else:
+            sql = f"""SELECT *
+                      FROM messages m
+                      WHERE folder = ? AND ({conditions})
+                      ORDER BY date DESC"""
 
         print(f'[debug] {conditions}, {params}')
 
@@ -170,3 +188,52 @@ class EmailCache:
         self.conn.execute("DELETE FROM messages WHERE folder = ?", (folder,))
         self.conn.execute("DELETE FROM folder_state WHERE folder = ?", (folder,))
         self.conn.commit()
+
+    # Tag operations
+    def add_tag(self, uid: int, folder: str, tag: str):
+        """Add a tag to a message"""
+        self.conn.execute(
+            "INSERT OR IGNORE INTO tags (uid, folder, tag) VALUES (?, ?, ?)",
+            (uid, folder, tag)
+        )
+        self.conn.commit()
+
+    def remove_tag(self, uid: int, folder: str, tag: str):
+        """Remove a tag from a message"""
+        self.conn.execute(
+            "DELETE FROM tags WHERE uid = ? AND folder = ? AND tag = ?",
+            (uid, folder, tag)
+        )
+        self.conn.commit()
+
+    def get_tags(self, uid: int, folder: str) -> list[str]:
+        """Get all tags for a message"""
+        cur = self.conn.execute(
+            "SELECT tag FROM tags WHERE uid = ? AND folder = ? ORDER BY tag",
+            (uid, folder)
+        )
+        return [row[0] for row in cur.fetchall()]
+
+    def tag_messages(self, folder: str, query: str, tags_to_add: list[str], tags_to_remove: list[str] = None):
+        """Apply tags to messages matching a query (like notmuch tag command)
+
+        Args:
+            folder: Folder to search in
+            query: Search query to find messages
+            tags_to_add: List of tags to add (e.g., ['newsletter', 'automated'])
+            tags_to_remove: List of tags to remove (e.g., ['inbox', 'unread'])
+
+        Returns:
+            Number of messages tagged
+        """
+        messages = self.search(folder, query)
+
+        for msg in messages:
+            for tag in tags_to_add:
+                self.add_tag(msg.uid, msg.folder, tag)
+
+            if tags_to_remove:
+                for tag in tags_to_remove:
+                    self.remove_tag(msg.uid, msg.folder, tag)
+
+        return len(messages)
