@@ -224,20 +224,17 @@ class EmailCache:
         )
         return [row[0] for row in cur.fetchall()]
 
-    def tag_messages(self, folder: str, query: str, tags_to_add: list[str], tags_to_remove: list[str] = None):
+    def tag_messages(self, messages: list[CachedMessage], tags_to_add: list[str], tags_to_remove: list[str] = None):
         """Apply tags to messages matching a query (like notmuch tag command)
 
         Args:
-            folder: Folder to search in
-            query: Search query to find messages
+            messages: List of CachedMessage or (uid, folder)
             tags_to_add: List of tags to add (e.g., ['newsletter', 'automated'])
             tags_to_remove: List of tags to remove (e.g., ['inbox', 'unread'])
 
         Returns:
             Number of messages tagged
         """
-        messages = self.search(folder, query)
-
         for msg in messages:
             for tag in tags_to_add:
                 self.add_tag(msg.uid, msg.folder, tag)

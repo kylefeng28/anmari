@@ -76,5 +76,59 @@ def repl():
     # TODO Prevent repl from invoking a new repl instance
     anmari_repl(cli)
 
+
+@cli.command()
+@click.option('--account', '-a', default=0, help='Account index')
+@click.option('--folder', '-f', default='INBOX', help='Folder to apply tags')
+@click.argument('tags_and_query', nargs=-1, required=True)
+def tag(account: int, folder: str, tags_and_query: tuple):
+    """Apply local tags to messages matching a query
+
+    Usage: tag +tag1 +tag2 -tag3 <query>
+
+    Examples:
+      tag +newsletter from:Instagram
+      tag +important -inbox subject:meeting
+      tag -spam +inbox from:boss
+    """
+    config = AccountConfig(account)
+    cache = EmailCache(account, config.get('cache_days', 90))
+
+    # Parse tags and query
+    tags_to_add = []
+    tags_to_remove = []
+    query_parts = []
+
+    for part in tags_and_query:
+        if part.startswith('+'):
+            tags_to_add.append(part[1:])
+        elif part.startswith('-'):
+            tags_to_remove.append(part[1:])
+        else:
+            query_parts.append(part)
+
+    if not tags_to_add and not tags_to_remove:
+        click.echo("Error: No tags specified. Use +tag to add, -tag to remove", err=True)
+        return
+
+    if not query_parts:
+        click.echo("Error: No search query specified", err=True)
+        return
+
+    query = ' '.join(query_parts)
+
+    msgs = cache.search(folder, query)
+
+    # Apply tags
+    count = cache.tag_messages(msgs, tags_to_add, tags_to_remove or None)
+
+    add_str = f"+{', +'.join(tags_to_add)}" if tags_to_add else ""
+    remove_str = f"-{', -'.join(tags_to_remove)}" if tags_to_remove else ""
+    tags_str = f"{add_str} {remove_str}".strip()
+
+    # TODO display number of messages that had their tags actually changed
+    click.echo(f"Tagged {count} messages with {tags_str}")
+
+
 if __name__ == '__main__':
     cli()
