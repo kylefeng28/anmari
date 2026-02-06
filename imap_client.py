@@ -1,5 +1,4 @@
-import imaplib
-import re
+from imapclient import IMAPClient
 import email
 from email.header import decode_header
 from email.utils import parseaddr
@@ -7,12 +6,16 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass
 import click
 
+FLAGS = 'FLAGS'
 
 # Fetch the message data by UID, including flags and internal date
 #  'RFC822' will read the message body and mark it as read; we don't want this
 # 'RFC822.HEADER' or 'BODY.PEEK[HEADER]' just fetches headers
 # 'RFC822.HEADER' or 'BODY.PEEK[HEADER]' just fetches headers
-FETCH_HEADER_DESCRIPTOR = '(FLAGS BODY.PEEK[HEADER])'
+BODY_PEEK_HEADER = 'BODY.PEEK[HEADER]'
+BODY_HEADER = 'BODY[HEADER]'
+
+ENVELOPE = 'ENVELOPE'
 
 # imaplib reference
 # FETCH by UID: imap.uid('FETCH', uid_str, descriptor) -> status, data
@@ -20,18 +23,6 @@ FETCH_HEADER_DESCRIPTOR = '(FLAGS BODY.PEEK[HEADER])'
 #     # output: data = [('1 (UID 123 BODY[...])', b'...'), b')']
 #     data is a list of tuples separated by ')' (string with a single closing parenthesis)
 #     Each tuple is (message_parts, raw_email_bytes)
-
-# IMAP operations
-def connect_imap(host: str, port: int, email_addr: str, password: str):
-    """Connect to IMAP server"""
-    ssl = imaplib.ssl.SSLContext()
-    ssl.load_default_certs()
-    imap = imaplib.IMAP4_SSL(host=host, port=port, ssl_context=ssl)
-    print(f'Logging in as {email_addr} to IMAP server {host}:{port}')
-    imap.login(email_addr, password)
-    return imap
-
-
 def decode_header_value(value):
     """Decode email header value"""
     if not value:
@@ -46,15 +37,20 @@ def decode_header_value(value):
     return " ".join(parts)
 
 
-def parse_uid_flags(metadata_str):
-    # \ $
-    match = re.search(r'UID\s+(?P<uid>\d+)(\s?FLAGS \((?P<flags>[\\\$\s\w]*)\))', metadata_str)
-    uid = match.group('uid')
-    flags = match.group('flags')
-    # can also use imaplib.ParseFlags()
-    return uid, flags
+def decode_if_bytes(maybe_bytes):
+    if isinstance(maybe_bytes, bytes):
+        return maybe_bytes.decode()
+    else:
+        return str(maybe_bytes)
 
-def parse_envelope(raw_email):
+
+def parse_flags(data):
+    return [decode_if_bytes(flag) for flag in data[b'FLAGS']]
+
+
+def parse_envelope(data, descriptor_name):
+    raw_email = data[descriptor_name.encode()]
+
     # Parse envelope
     msg = email.message_from_bytes(raw_email)
     # Parse email address into (name, addr)
@@ -81,26 +77,23 @@ class Envelope:
 class EmailImapClient:
     def __init__(self, host, port, email_addr, password, cache):
         self.email_addr = email_addr
-        self.imap = connect_imap(host, port, email_addr, password)
         self.cache = cache
+        self.client = IMAPClient(host, port=port, ssl=True)
+        print(f'Logging in as {email_addr} to IMAP server {host}:{port}')
+        self.client.login(email_addr, password)
 
     def close(self):
-        self.imap.close()
-        self.imap.logout()
+        self.client.logout()
 
     def select_folder(self, folder):
-        self.imap.select(folder, readonly=True)
+        self.client.select_folder(folder, readonly=True)
 
     def get_unread_messages(self):
-        status, data = self.imap.search(None, 'UNSEEN')
-        unread_message_nums = data[0].split()
-        return unread_message_nums
+        return self.client.search('UNSEEN')
 
-    def get_uids(self, cond):
-        status, data = self.imap.uid('SEARCH', None, cond)
-        if status != 'OK':
-            raise f'Error getting uids for {cond}'
-        return [int(uid) for uid in data[0].split()]
+    def get_uids(self, uid_range):
+        """Get UIDs in range (e.g., '123:*' or '1:500')"""
+        return self.client.search(f'UID {uid_range}')
 
     # RFC 4549 sync algorithm
     # https://www.rfc-editor.org/rfc/rfc4549#section-3
@@ -118,33 +111,26 @@ class EmailImapClient:
             print(f"Step 1: Fetching new messages since last sync (uid {last_seen_uid})")
 
             new_last_seen_uid = None
-            new_uid_list = self.get_uids(f'UID {last_seen_uid+1}:*')
+            new_uid_list = self.get_uids(f'{last_seen_uid+1}:*')
 
             if len(new_uid_list) > 0:
                 print(f"Found {len(new_uid_list)} new messages.")
                 new_last_seen_uid = int(new_uid_list[-1]) # The highest UID is the new last seen
             else:
                 print("No new messages found")
+                return []
 
             # Fetch details for each new message
             envelopes = []
+            messages = self.client.fetch(new_uid_list, [FLAGS, BODY_PEEK_HEADER])
 
-            status, data = self.imap.uid('FETCH', f'{last_seen_uid+1}:*', FETCH_HEADER_DESCRIPTOR)
-            if status != 'OK':
-                click.echo(f"Could not fetch new messages. status={status}, data={data}", err=True)
-                raise 'Error fetching new messages'
-
-            for msg_tuple in data:  # loop through list of tuples
-                if not isinstance(msg_tuple, tuple):
-                    continue
-
-                # Parse flags
-                part = msg_tuple[0].decode('utf-8', errors='ignore')
-                uid, flags = parse_uid_flags(part)
+            for uid, data in messages.items():
+                # Get flags
+                flags = ' '.join(flag.decode() if isinstance(flag, bytes) else str(flag) 
+                               for flag in data[b'FLAGS'])
 
                 # Parse envelope
-                raw_email = msg_tuple[1]
-                envelope = parse_envelope(raw_email)
+                envelope = parse_envelope(data, BODY_HEADER)
                 envelopes.append((uid, flags, envelope))
 
             return envelopes
@@ -156,25 +142,27 @@ class EmailImapClient:
             # This is assuming no CONDSTORE support
             print(f"Step 2: Checking changes to old messages since last sync (uid {last_seen_uid})")
 
-            status, data = self.imap.uid('FETCH', f'1:{last_seen_uid}', 'FLAGS')
-            if status != 'OK':
-                click.echo(f"Could not fetch old messages. status={status}, data={data}", err=True)
-                raise 'Error fetching old messages'
+            old_uid_list = self.get_uids(f'1:{last_seen_uid}')
+
+            if not old_uid_list:
+                print("No old messages to check")
+                return []
+
+            messages = self.client.fetch(old_uid_list, ['FLAGS'])
 
             results = []
-            for metadata_str in data:
-                # Parse flags
-                part = metadata_str.decode('utf-8', errors='ignore')
-                uid, flags = parse_uid_flags(part)
+            for uid, data in messages.items():
+                flags = ' '.join(flag.decode() if isinstance(flag, bytes) else str(flag) 
+                               for flag in data[b'FLAGS'])
                 results.append((uid, flags))
 
             print(f"Will check {len(results)} old messages that have potentially changed.")
             return results
 
         new_messages = _fetch_new_messages()
-        total_new = len(new_messages)
 
         print('Updating cache for new')
+        total_new = 0
         for (uid, flags, envelope) in new_messages:
             cached = self.cache.get_message(uid, folder)
             if not cached:
@@ -187,6 +175,8 @@ class EmailImapClient:
                     envelope.subject,
                     envelope.date_ts,
                     flags)
+                total_new += 1
+        print(f'Added {total_new} new messages to cache')
 
         old_messages = _fetch_old_messages()
         total_updated = 0
@@ -196,7 +186,7 @@ class EmailImapClient:
             cached = self.cache.get_message(uid, folder)
             if cached:
                 if cached['flags'] != flags:
-                    print(f"Updating UID {uid} in cache with")
+                    print(f"Updating UID {uid} in cache")
                     print(f"Old flags: {cached['flags']}")
                     print(f"New flags: {flags}")
 
