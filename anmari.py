@@ -60,7 +60,11 @@ def search(account: int, folder: str, limit: int, all: bool, query: str):
     for msg in results[:display_limit]:
         date = msg.date
         from_display = f'{formataddr((msg.from_name, msg.from_addr))}' if msg.from_name else msg.from_addr
-        click.echo(f"  [{msg.uid}] {date} {from_display} - {msg.subject}")
+        gm_labels = cache.get_gm_labels(msg.uid, folder)
+        display = f"  [{msg.uid}] {date} {from_display} - {msg.subject}"
+        if gm_labels:
+            display += f"  [labels: {gm_labels}]"
+        click.echo(display)
 
     if len(results) > display_limit:
         click.echo(f"  ... and {len(results) - display_limit} more")

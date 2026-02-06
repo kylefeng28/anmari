@@ -45,6 +45,11 @@ def parse_flags(data):
     return [decode_if_bytes(flag) for flag in data[FLAGS_b]]
 
 
+def parse_gm_labels(is_gmail, data):
+    if is_gmail and X_GM_LABELS_b in data:
+        return [decode_if_bytes(label) for label in data[X_GM_LABELS_b]]
+    return None
+
 # Convert imapclient.response_types.Envelope into our own Envelope type
 def parse_envelope(data):
     envelope_dto = data[ENVELOPE_b]
@@ -178,12 +183,7 @@ class EmailImapClient:
                 for uid, data in messages.items():
                     flags = parse_flags(data)
                     envelope = parse_header(data)
-
-                    # Extract Gmail labels if available
-                    gm_labels = []
-                    if self.is_gmail and X_GM_LABELS_b in data:
-                        gm_labels = [label.decode() if isinstance(label, bytes) else str(label) 
-                                   for label in data[X_GM_LABELS_b]]
+                    gm_labels = parse_gm_labels(self.is_gmail, data)
 
                     envelopes.append((uid, flags, envelope, gm_labels))
 
@@ -201,6 +201,10 @@ class EmailImapClient:
             # TODO print timestamp of last sync
             print(f"Step 2: Checking flag changes to old messages since last sync")
 
+            fetch_items = [FLAGS]
+            if self.is_gmail:
+                fetch_items.append(X_GM_LABELS)
+
             # RFC 4549 Section 6.1: Use CONDSTORE / HIGHESTMODSEQ for efficient sync
             if self.has_condstore and cached_highestmodseq > 0:
                 if highestmodseq == cached_highestmodseq:
@@ -209,7 +213,7 @@ class EmailImapClient:
 
                 print(f"Using CONDSTORE to fetch changes since MODSEQ {cached_highestmodseq}")
                 # FETCH 1:* (FLAGS) (CHANGEDSINCE <cached-value>)
-                messages = self.client.fetch('1:*', [FLAGS], ['CHANGEDSINCE', str(cached_highestmodseq)])
+                messages = self.client.fetch('1:*', fetch_items, ['CHANGEDSINCE', str(cached_highestmodseq)])
 
                 print(f"Found {len(messages)} messages with flag changes")
 
@@ -225,12 +229,13 @@ class EmailImapClient:
 
                 print(f"Will check {len(old_uid_list)} old messages that have potentially changed.")
 
-                messages = self.client.fetch(old_uid_list, [FLAGS])
+                messages = self.client.fetch(old_uid_list, fetch_items)
 
             results = []
             for uid, data in messages.items():
                 flags = parse_flags(data)
-                results.append((uid, flags))
+                gm_labels = parse_gm_labels(self.is_gmail, data)
+                results.append((uid, flags, gm_labels))
 
             return results
 
@@ -239,13 +244,8 @@ class EmailImapClient:
 
             new = 0
             for item in new_messages:
-                # Handle both old format (uid, flags, envelope) and new format (uid, flags, envelope, gm_labels)
-                if len(item) == 4:
-                    uid, flags, envelope, gm_labels = item
-                else:
-                    uid, flags, envelope = item
-                    gm_labels = []
-                
+                uid, flags, envelope, gm_labels = item
+
                 cached = self.cache.get_message(uid, folder)
                 if not cached:
                     # print(f'[debug] inserting {uid}')
@@ -257,11 +257,11 @@ class EmailImapClient:
                         envelope.subject,
                         envelope.date,
                         flags)
-                    
+
                     # Store Gmail labels if available
                     if gm_labels:
                         self.cache.set_gm_labels(uid, folder, gm_labels)
-                    
+
                     new += 1
 
             print(f'Added {new} new messages to cache')
@@ -271,7 +271,7 @@ class EmailImapClient:
             print('Updating cache for old messages')
 
             updated = 0
-            for (uid, flags) in old_messages:
+            for (uid, flags, gm_labels) in old_messages:
                 cached = self.cache.get_message(uid, folder)
                 if cached:
                     cached_flags = cached.get_flags_as_list()
@@ -282,6 +282,12 @@ class EmailImapClient:
 
                         self.cache.update_flags(uid, folder, flags)
                         updated += 1
+
+                    # Store Gmail labels if available
+                    if gm_labels:
+                        print(f'Updating Gmail labels: {gm_labels}')
+                        self.cache.set_gm_labels(uid, folder, gm_labels)
+
                 else:
                     click.echo(f"UID {uid} not found in cache!")
                     print(flags)
