@@ -1,6 +1,7 @@
 import sqlite3
 from typing import NamedTuple, Optional
 
+from search import parse_search_query
 
 def get_db_path(account):
     return f"anmari_{account}.db"
@@ -131,17 +132,16 @@ class EmailCache:
         )
         return [row[0] for row in cur.fetchall()]
 
-    def search(self, folder: str, query: str) -> List[dict]:
-        """Search messages"""
-        pattern = f"%{query}%"
-        cur = self.conn.execute(
-            """SELECT uid, from_addr, from_name, subject, date, flags
-               FROM messages
-               WHERE folder = ? AND (from_addr LIKE ? OR subject LIKE ?)
-               ORDER BY date DESC""",
-            (folder, pattern, pattern)
-        )
-        return [dict(row) for row in cur.fetchall()]
+    def search(self, folder: str, query: str) -> List[CachedMessage]:
+        conditions, params = parse_search_query(query)
+
+        sql = f"""SELECT *
+                  FROM messages
+                  WHERE folder = ? AND ({conditions})
+                  ORDER BY date DESC"""
+
+        cur = self.conn.execute(sql, [folder] + params)
+        return [CachedMessage.from_row(row) for row in cur.fetchall()]
 
     def get_folder_state(self, folder: str) -> Optional[tuple[int, int]]:
         """Get cached UIDVALIDITY and HIGHESTMODSEQ for folder"""

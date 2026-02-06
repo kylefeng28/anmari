@@ -57,9 +57,9 @@ def search(account: int, folder: str, limit: int, all: bool, query: str):
 
     click.echo(f"Found {len(results)} messages in cache:")
     for msg in results[:display_limit]:
-        date = datetime.fromtimestamp(msg['date']).strftime('%Y-%m-%d')
-        from_display = msg['from_name'] if msg['from_name'] else msg['from_addr']
-        click.echo(f"  [{msg['uid']}] {date} {from_display} - {msg['subject']}")
+        date = msg.date
+        from_display = f'{msg.from_name} <{msg.from_addr}>' if msg.from_name else msg.from_addr
+        click.echo(f"  [{msg.uid}] {date} {from_display} - {msg.subject}")
 
     if len(results) > display_limit:
         click.echo(f"  ... and {len(results) - display_limit} more")
