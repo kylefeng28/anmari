@@ -36,6 +36,11 @@ class CachedMessage(NamedTuple):
         return normalize_flags_deserialize(self.flags)
 
 
+class CachedFolderState(NamedTuple):
+    uidvalidity: str
+    highestmodseq: str
+
+
 # Database
 class EmailCache:
     def __init__(self, account: str, cache_days: int):
@@ -137,3 +142,27 @@ class EmailCache:
             (folder, pattern, pattern)
         )
         return [dict(row) for row in cur.fetchall()]
+
+    def get_folder_state(self, folder: str) -> Optional[tuple[int, int]]:
+        """Get cached UIDVALIDITY and HIGHESTMODSEQ for folder"""
+        cur = self.conn.execute(
+            "SELECT uidvalidity, highestmodseq FROM folder_state WHERE folder = ?",
+            (folder,)
+        )
+        row = cur.fetchone()
+        return CachedFolderState(row[0], row[1]) if row else None
+
+    def set_folder_state(self, folder: str, uidvalidity: int, highestmodseq: int):
+        """Cache UIDVALIDITY and HIGHESTMODSEQ for folder"""
+        self.conn.execute(
+            """INSERT OR REPLACE INTO folder_state (folder, uidvalidity, highestmodseq)
+               VALUES (?, ?, ?)""",
+            (folder, uidvalidity, highestmodseq)
+        )
+        self.conn.commit()
+
+    def clear_folder(self, folder: str):
+        """Clear all messages and state for folder (used when UIDVALIDITY changes)"""
+        self.conn.execute("DELETE FROM messages WHERE folder = ?", (folder,))
+        self.conn.execute("DELETE FROM folder_state WHERE folder = ?", (folder,))
+        self.conn.commit()

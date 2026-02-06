@@ -76,11 +76,21 @@ class EmailImapClient:
         print(f'Logging in as {email_addr} to IMAP server {host}:{port}')
         self.client.login(email_addr, password)
 
+        # Check and enable CONDSTORE capability
+        self.has_condstore = self.client.has_capability('CONDSTORE')
+        if self.has_condstore:
+            self.client.enable('CONDSTORE')
+        print(f'CONDSTORE support: {self.has_condstore}')
+
     def close(self):
         self.client.logout()
 
     def select_folder(self, folder):
-        self.client.select_folder(folder, readonly=True)
+        """Select folder and return (uidvalidity, highestmodseq)"""
+        response = self.client.select_folder(folder, readonly=True)
+        uidvalidity = response[b'UIDVALIDITY']
+        highestmodseq = response.get(b'HIGHESTMODSEQ', 0) if self.has_condstore else 0
+        return uidvalidity, highestmodseq
 
     def get_unread_messages(self):
         return self.client.search('UNSEEN')
@@ -105,9 +115,26 @@ class EmailImapClient:
     def sync_from_server(self, folder, page_size):
         print(f"Syncing {folder} from {self.email_addr}...")
 
-        last_seen_uid = self.cache.get_last_seen_uid(folder)
+        # Step 1: Check UIDVALIDITY and HIGHESTMODSEQ
+        uidvalidity, highestmodseq = self.select_folder(folder)
+        print(f'Server UIDVALIDITY: {uidvalidity}, HIGHESTMODSEQ: {highestmodseq}')
 
-        self.select_folder(folder)
+        cached_state = self.cache.get_folder_state(folder)
+
+        # Check if UIDVALIDITY changed (folder was deleted/recreated)
+        if cached_state:
+            cached_uidvalidity, cached_highestmodseq = cached_state
+            print(f'Cached UIDVALIDITY: {cached_uidvalidity}, HIGHESTMODSEQ: {cached_highestmodseq}')
+
+            if cached_uidvalidity != uidvalidity:
+                print('⚠️  UIDVALIDITY changed! Clearing local cache and starting fresh.')
+                self.cache.clear_folder(folder)
+                cached_state = None
+                cached_highestmodseq = 0
+        else:
+            cached_highestmodseq = 0
+
+        last_seen_uid = self.cache.get_last_seen_uid(folder)
 
         # Step 1: We search for all UIDs greater than the last seen UID to get new messages
         # #UID FETCH <lastseenuid+1>:* <descriptors>'
@@ -139,26 +166,48 @@ class EmailImapClient:
                 yield envelopes
 
         def _fetch_old_messages():
-            # Step 2: We search for all UIDs before the last seen UID to get flag changes to old messages
-            # UID FETCH 1:<lastseenuid> FLAGS
-            # TODO print timestamp of last sync
-            # This is assuming no CONDSTORE support
-            print(f"Step 2: Checking changes to old messages since last sync (uid {last_seen_uid})")
+            # Step 2: Check flag changes to old messages
+            # With CONDSTORE: Use CHANGEDSINCE to only fetch changed messages
+            # Without CONDSTORE: Fetch all old messages before last seen UID
 
-            old_uid_list = self.get_uids(f'UID 1:{last_seen_uid}')
-
-            if not old_uid_list:
-                print("No old messages to check")
+            if not last_seen_uid:
+                print("No old messages to check (initial sync)")
                 return []
 
-            messages = self.client.fetch(old_uid_list, [FLAGS])
+            # TODO print timestamp of last sync
+            print(f"Step 2: Checking flag changes to old messages since last sync")
+
+            # RFC 4549 Section 6.1: Use CONDSTORE / HIGHESTMODSEQ for efficient sync
+            if self.has_condstore and cached_highestmodseq > 0:
+                if highestmodseq == cached_highestmodseq:
+                    print(f"HIGHESTMODSEQ unchanged ({highestmodseq}), skipping flag check")
+                    return []
+
+                print(f"Using CONDSTORE to fetch changes since MODSEQ {cached_highestmodseq}")
+                # FETCH 1:* (FLAGS) (CHANGEDSINCE <cached-value>)
+                messages = self.client.fetch('1:*', [FLAGS], ['CHANGEDSINCE', str(cached_highestmodseq)])
+
+                print(f"Found {len(messages)} messages with flag changes")
+
+            # No CONDSTORE: Fetch all old messages
+            else:
+                print(f"Checking changes to old messages since last sync (uid {last_seen_uid})")
+                # FETCH 1:<lastseenuid> FLAGS
+                old_uid_list = self.get_uids(f'UID 1:{last_seen_uid}')
+
+                if not old_uid_list:
+                    print("No old messages to check")
+                    return []
+
+                print(f"Will check {len(old_uid_list)} old messages that have potentially changed.")
+
+                messages = self.client.fetch(old_uid_list, [FLAGS])
 
             results = []
             for uid, data in messages.items():
                 flags = parse_flags(data)
                 results.append((uid, flags))
 
-            print(f"Will check {len(results)} old messages that have potentially changed.")
             return results
 
         def _update_cache_new_messages(new_messages):
@@ -168,7 +217,7 @@ class EmailImapClient:
             for (uid, flags, envelope) in new_messages:
                 cached = self.cache.get_message(uid, folder)
                 if not cached:
-                    print(f'[debug] inserting {uid}')
+                    # print(f'[debug] inserting {uid}')
                     self.cache.insert_message(
                         uid,
                         folder,
@@ -201,17 +250,21 @@ class EmailImapClient:
                     click.echo(f"UID {uid} not found in cache!")
                     print(flags)
 
-            print(f'Added {updated} new messages to cache')
+            print(f'Updated {updated} messages in cache')
             return updated
 
         total_new = 0
         for new_messages_page in _fetch_new_messages():
             total_new += _update_cache_new_messages(new_messages_page)
 
+        total_updated = 0
         if last_seen_uid:
-            total_updated = 0
+            print()
             old_messages = _fetch_old_messages()
             total_updated += _update_cache_old_messages(old_messages)
+
+        # Update cached folder state
+        self.cache.set_folder_state(folder, uidvalidity, highestmodseq)
 
         # Detect expunged
         total_expunged = 0
