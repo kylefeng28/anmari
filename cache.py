@@ -86,6 +86,16 @@ class EmailCache:
             );
             CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
             CREATE INDEX IF NOT EXISTS idx_tags_message ON tags(uid, folder);
+            
+            CREATE TABLE IF NOT EXISTS gm_labels (
+                uid INTEGER NOT NULL,
+                folder TEXT NOT NULL,
+                label TEXT NOT NULL,
+                PRIMARY KEY (uid, folder, label),
+                FOREIGN KEY (uid, folder) REFERENCES messages(uid, folder) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_gm_labels_label ON gm_labels(label);
+            CREATE INDEX IF NOT EXISTS idx_gm_labels_message ON gm_labels(uid, folder);
         """)
         self.conn.commit()
 
@@ -237,3 +247,27 @@ class EmailCache:
                     self.remove_tag(msg.uid, msg.folder, tag)
 
         return len(messages)
+
+    # Gmail label operations
+    def set_gm_labels(self, uid: int, folder: str, labels: list[str]):
+        """Set Gmail labels for a message (replaces existing labels)"""
+        # Clear existing labels
+        self.conn.execute(
+            "DELETE FROM gm_labels WHERE uid = ? AND folder = ?",
+            (uid, folder)
+        )
+        # Insert new labels
+        for label in labels:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO gm_labels (uid, folder, label) VALUES (?, ?, ?)",
+                (uid, folder, label)
+            )
+        self.conn.commit()
+
+    def get_gm_labels(self, uid: int, folder: str) -> list[str]:
+        """Get all Gmail labels for a message"""
+        cur = self.conn.execute(
+            "SELECT label FROM gm_labels WHERE uid = ? AND folder = ? ORDER BY label",
+            (uid, folder)
+        )
+        return [row[0] for row in cur.fetchall()]

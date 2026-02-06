@@ -19,6 +19,8 @@ BODY_HEADER, BODY_HEADER_b = 'BODY[HEADER]', b'BODY[HEADER]'
 
 ENVELOPE, ENVELOPE_b = 'ENVELOPE', b'ENVELOPE'
 
+X_GM_LABELS, X_GM_LABELS_b = 'X-GM-LABELS', b'X-GM-LABELS'
+
 # imaplib reference
 # FETCH by UID: imap.uid('FETCH', uid_str, descriptor) -> status, data
 #     status, data = imap.uid('fetch', uid_range, '(BODY.PEEK)')
@@ -88,6 +90,10 @@ class EmailImapClient:
         if self.has_condstore:
             self.client.enable('CONDSTORE')
         print(f'CONDSTORE support: {self.has_condstore}')
+        
+        # Check Gmail capability (X-GM-EXT-1)
+        self.is_gmail = self.client.has_capability('X-GM-EXT-1')
+        print(f'Gmail support: {self.is_gmail}')
 
     def close(self):
         self.client.logout()
@@ -163,14 +169,23 @@ class EmailImapClient:
                 return []
 
             # Fetch details for each new message
-            # for messages in self.fetch_paginate(new_uid_list, page_size, [FLAGS, ENVELOPE]):
-            for messages in self.fetch_paginate(new_uid_list, page_size, [FLAGS, BODY_PEEK_HEADER]):
+            fetch_items = [FLAGS, BODY_PEEK_HEADER]
+            if self.is_gmail:
+                fetch_items.append(X_GM_LABELS)
+
+            for messages in self.fetch_paginate(new_uid_list, page_size, fetch_items):
                 envelopes = []
                 for uid, data in messages.items():
                     flags = parse_flags(data)
-                    # envelope = parse_envelope(data)
                     envelope = parse_header(data)
-                    envelopes.append((uid, flags, envelope))
+
+                    # Extract Gmail labels if available
+                    gm_labels = []
+                    if self.is_gmail and X_GM_LABELS_b in data:
+                        gm_labels = [label.decode() if isinstance(label, bytes) else str(label) 
+                                   for label in data[X_GM_LABELS_b]]
+
+                    envelopes.append((uid, flags, envelope, gm_labels))
 
                 yield envelopes
 
@@ -223,7 +238,14 @@ class EmailImapClient:
             print('Updating cache for new messages')
 
             new = 0
-            for (uid, flags, envelope) in new_messages:
+            for item in new_messages:
+                # Handle both old format (uid, flags, envelope) and new format (uid, flags, envelope, gm_labels)
+                if len(item) == 4:
+                    uid, flags, envelope, gm_labels = item
+                else:
+                    uid, flags, envelope = item
+                    gm_labels = []
+                
                 cached = self.cache.get_message(uid, folder)
                 if not cached:
                     # print(f'[debug] inserting {uid}')
@@ -235,6 +257,11 @@ class EmailImapClient:
                         envelope.subject,
                         envelope.date,
                         flags)
+                    
+                    # Store Gmail labels if available
+                    if gm_labels:
+                        self.cache.set_gm_labels(uid, folder, gm_labels)
+                    
                     new += 1
 
             print(f'Added {new} new messages to cache')
