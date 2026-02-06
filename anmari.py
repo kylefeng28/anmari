@@ -12,6 +12,7 @@ from email.utils import formataddr
 from config import AccountConfig
 from cache import EmailCache
 from imap_client import EmailImapClient
+from repl import repl as anmari_repl
 
 
 # Commands
@@ -69,6 +70,11 @@ def search(account: int, folder: str, limit: int, all: bool, query: str):
     if len(results) > display_limit:
         click.echo(f"  ... and {len(results) - display_limit} more")
 
+
+@cli.command()
+def repl():
+    # TODO Prevent repl from invoking a new repl instance
+    anmari_repl(cli)
 
 if __name__ == '__main__':
     cli()
