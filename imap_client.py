@@ -6,6 +6,8 @@ from datetime import datetime, timedelta
 from typing import NamedTuple
 import click
 
+from utils import decode_if_bytes
+
 FLAGS, FLAGS_b = 'FLAGS', b'FLAGS'
 
 # Fetch the message data by UID, including flags and internal date
@@ -37,13 +39,6 @@ def decode_header_value(value):
     return " ".join(parts)
 
 
-def decode_if_bytes(maybe_bytes):
-    if isinstance(maybe_bytes, bytes):
-        return maybe_bytes.decode()
-    else:
-        return str(maybe_bytes)
-
-
 def parse_flags(data):
     return [decode_if_bytes(flag) for flag in data[FLAGS_b]]
 
@@ -51,10 +46,8 @@ def parse_flags(data):
 # Convert imapclient.response_types.Envelope into our own Envelope type
 def parse_envelope(data):
     envelope_dto = data[ENVELOPE_b]
-    from_ = envelope_dto.from_
-    from_addr, from_name = None, None
-    if from_:
-        from_addr, from_name, = from_[0].host, from_[0].mailbox
+    from_ = str(envelope_dto.from_[0])
+    from_name, from_addr, = parseaddr(from_)
     subject = envelope_dto.subject or ''
     date_ts = envelope_dto.date
 

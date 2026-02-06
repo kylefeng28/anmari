@@ -2,6 +2,7 @@ import sqlite3
 from typing import NamedTuple, Optional
 
 from search import parse_search_query
+from utils import decode_if_bytes
 
 def get_db_path(account):
     return f"anmari_{account}.db"
@@ -30,7 +31,8 @@ class CachedMessage(NamedTuple):
     @classmethod
     def from_row(cls, row):
         return CachedMessage(**{
-            k: v for k, v in dict(row).items() if k in CachedMessage._fields
+            k: decode_if_bytes(v)
+            for k, v in dict(row).items() if k in CachedMessage._fields
         })
 
     def get_flags_as_list(self):
@@ -139,6 +141,8 @@ class EmailCache:
                   FROM messages
                   WHERE folder = ? AND ({conditions})
                   ORDER BY date DESC"""
+
+        print(f'[debug] {conditions}, {params}')
 
         cur = self.conn.execute(sql, [folder] + params)
         return [CachedMessage.from_row(row) for row in cur.fetchall()]
