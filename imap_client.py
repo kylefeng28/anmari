@@ -95,7 +95,7 @@ class EmailImapClient:
         if self.has_condstore:
             self.client.enable('CONDSTORE')
         print(f'CONDSTORE support: {self.has_condstore}')
-        
+
         # Check Gmail capability (X-GM-EXT-1)
         self.is_gmail = self.client.has_capability('X-GM-EXT-1')
         print(f'Gmail support: {self.is_gmail}')
@@ -157,7 +157,7 @@ class EmailImapClient:
         # Step 1: We search for all UIDs greater than the last seen UID to get new messages
         # #UID FETCH <lastseenuid+1>:* <descriptors>'
         # TODO print timestamp of last sync
-        def _fetch_new_messages():
+        def _fetch_new_messages() -> (list[Envelope], list[int]):
             if last_seen_uid:
                 print(f"Step 1: Fetching new messages since last sync (uid {last_seen_uid})")
                 new_uid_list = self.get_uids(f'UID {last_seen_uid+1}:*')
@@ -171,7 +171,7 @@ class EmailImapClient:
                 print(f"Found {len(new_uid_list)} new messages (ranging from {uid_min} to {uid_max}).")
             else:
                 print("No new messages found")
-                return []
+                return [], []
 
             # Fetch details for each new message
             fetch_items = [FLAGS, BODY_PEEK_HEADER]
@@ -187,19 +187,24 @@ class EmailImapClient:
 
                     envelopes.append((uid, flags, envelope, gm_labels))
 
-                yield envelopes
+                yield envelopes, new_uid_list
 
-        def _fetch_old_messages():
+        # Returns list of (potentially) changed messages since last since and a list of all UIDs from 1:last_seen_uid
+        def _fetch_old_messages() -> (list[Envelope], list[int]):
             # Step 2: Check flag changes to old messages
             # With CONDSTORE: Use CHANGEDSINCE to only fetch changed messages
             # Without CONDSTORE: Fetch all old messages before last seen UID
 
             if not last_seen_uid:
                 print("No old messages to check (initial sync)")
-                return []
+                return [], []
 
             # TODO print timestamp of last sync
             print(f"Step 2: Checking flag changes to old messages since last sync")
+
+            # Fetch old uids for both non-CONDSTORE / HIGHESTMODSEQ and for expunge local cache
+            # FETCH 1:<lastseenuid> FLAGS
+            old_uid_list = self.get_uids(f'UID 1:{last_seen_uid}')
 
             fetch_items = [FLAGS]
             if self.is_gmail:
@@ -209,7 +214,7 @@ class EmailImapClient:
             if self.has_condstore and cached_highestmodseq > 0:
                 if highestmodseq == cached_highestmodseq:
                     print(f"HIGHESTMODSEQ unchanged ({highestmodseq}), skipping flag check")
-                    return []
+                    return [], old_uid_list
 
                 print(f"Using CONDSTORE to fetch changes since MODSEQ {cached_highestmodseq}")
                 # FETCH 1:* (FLAGS) (CHANGEDSINCE <cached-value>)
@@ -220,15 +225,13 @@ class EmailImapClient:
             # No CONDSTORE: Fetch all old messages
             else:
                 print(f"Checking changes to old messages since last sync (uid {last_seen_uid})")
-                # FETCH 1:<lastseenuid> FLAGS
-                old_uid_list = self.get_uids(f'UID 1:{last_seen_uid}')
-
                 if not old_uid_list:
                     print("No old messages to check")
-                    return []
+                    return [], []
 
                 print(f"Will check {len(old_uid_list)} old messages that have potentially changed.")
 
+                # FETCH 1:<lastseenuid> FLAGS
                 messages = self.client.fetch(old_uid_list, fetch_items)
 
             results = []
@@ -237,7 +240,7 @@ class EmailImapClient:
                 gm_labels = parse_gm_labels(self.is_gmail, data)
                 results.append((uid, flags, gm_labels))
 
-            return results
+            return results, old_uid_list
 
         def _update_cache_new_messages(new_messages):
             print('Updating cache for new messages')
@@ -296,27 +299,38 @@ class EmailImapClient:
             return updated
 
         total_new = 0
-        for new_messages_page in _fetch_new_messages():
+        server_uids = set()  # Track all UIDs seen on server
+
+        for new_messages_page, new_uids in _fetch_new_messages():
             total_new += _update_cache_new_messages(new_messages_page)
+            server_uids.update(new_uids)
 
         total_updated = 0
         if last_seen_uid:
             print()
-            old_messages = _fetch_old_messages()
+            old_messages, old_uids = _fetch_old_messages()
             total_updated += _update_cache_old_messages(old_messages)
+            server_uids.update(old_uids)
 
         # Update cached folder state
         self.cache.set_folder_state(folder, uidvalidity, highestmodseq)
 
-        # Detect expunged
+        # Detect expunged messages
         total_expunged = 0
-        #     if last_seen_uid:
-        #         cached_uids = self.cache.get_all_uids(folder)
-        #         for uid in cached_uids:
-        #             if uid not in server_uids:
-        #                 self.cache.delete_message(uid, folder)
-        #                 total_expunged += 1
+        if last_seen_uid:
+            print()
+            print("Step 3: Detecting expunged messages")
+            cached_uids = self.cache.get_all_uids(folder)
 
+            uids_to_expunge = set(cached_uids) - server_uids
+
+            for uid in uids_to_expunge:
+                print(f"  Expunging UID {uid} (deleted on server)")
+                self.cache.delete_message(uid, folder)
+                total_expunged += 1
+
+            if total_expunged == 0:
+                print("  No expunged messages")
 
         if last_seen_uid:
             print(f"\nSync complete! New: {total_new}, Updated: {total_updated}, Expunged: {total_expunged}")

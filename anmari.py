@@ -91,7 +91,7 @@ def tag(account: int, folder: str, tags_and_query: tuple):
       tag +important -inbox subject:meeting
       tag -- -spam +inbox from:boss
       tag -- -actionable +reference from:"Bank of America" subject:"transaction exceeds"
-    
+
     Note: Use -- before query if it starts with - to prevent option parsing.
     """
     config = AccountConfig(account)
