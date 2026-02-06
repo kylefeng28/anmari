@@ -86,24 +86,19 @@ class EmailImapClient:
         return self.client.search('UNSEEN')
 
 
-    def get_uids(self, uid_range):
-        """Get UIDs in range (e.g., '123:*' or '1:500')"""
-        return self.client.search([f'{uid_range}'])
-
+    def get_uids(self, cond='ALL'):
+        """Get UIDs. e.g. ALL or a range (e.g., 'UID 123:*' or 'UID 1:500')"""
+        return self.client.search(f'{cond}')
 
     def fetch_paginate(self, uids: list[int], page_size: int, descriptors: list[str], modifiers: list[str] = None):
-        messages = {}
-
         uid_pages = [uids[i:i + page_size] for i in range(0, len(uids), page_size)]
         i = 0
         print(f'Starting fetch for {len(uids)} items, using page_size={page_size}')
         for uid_page in uid_pages:
             print(f'Fetching page {i} ({len(uid_page)} items)')
             page_messages = self.client.fetch(uid_page, descriptors, modifiers)
-            messages.update(page_messages)
+            yield page_messages
             i += 1
-
-        return messages
 
     # RFC 4549 sync algorithm
     # https://www.rfc-editor.org/rfc/rfc4549#section-3
@@ -120,30 +115,28 @@ class EmailImapClient:
         def _fetch_new_messages():
             if last_seen_uid:
                 print(f"Step 1: Fetching new messages since last sync (uid {last_seen_uid})")
-                new_last_seen_uid = None
-                new_uid_list = self.get_uids(f'{last_seen_uid+1}:*')
-
+                new_uid_list = self.get_uids(f'UID {last_seen_uid+1}:*')
             else:
                 print("No cache detected. Starting full sync.")
                 new_uid_list = self.get_uids('ALL')
 
             if len(new_uid_list) > 0:
-                print(f"Found {len(new_uid_list)} new messages.")
-                new_last_seen_uid = int(new_uid_list[-1]) # The highest UID is the new last seen
+                new_uid_list = sorted(map(int, new_uid_list))
+                uid_min, uid_max = new_uid_list[0], new_uid_list[-1]
+                print(f"Found {len(new_uid_list)} new messages (ranging from {uid_min} to {uid_max}).")
             else:
                 print("No new messages found")
                 return []
 
             # Fetch details for each new message
-            envelopes = []
-            messages = self.fetch_paginate(new_uid_list, page_size, [FLAGS, ENVELOPE])
+            for messages in self.fetch_paginate(new_uid_list, page_size, [FLAGS, ENVELOPE]):
+                envelopes = []
+                for uid, data in messages.items():
+                    flags = parse_flags(data)
+                    envelope = parse_envelope(data)
+                    envelopes.append((uid, flags, envelope))
 
-            for uid, data in messages.items():
-                flags = parse_flags(data)
-                envelope = parse_envelope(data)
-                envelopes.append((uid, flags, envelope))
-
-            return envelopes
+                yield envelopes
 
         def _fetch_old_messages():
             # Step 2: We search for all UIDs before the last seen UID to get flag changes to old messages
@@ -152,7 +145,7 @@ class EmailImapClient:
             # This is assuming no CONDSTORE support
             print(f"Step 2: Checking changes to old messages since last sync (uid {last_seen_uid})")
 
-            old_uid_list = self.get_uids(f'1:{last_seen_uid}')
+            old_uid_list = self.get_uids(f'UID 1:{last_seen_uid}')
 
             if not old_uid_list:
                 print("No old messages to check")
@@ -168,30 +161,31 @@ class EmailImapClient:
             print(f"Will check {len(results)} old messages that have potentially changed.")
             return results
 
-        new_messages = _fetch_new_messages()
+        def _update_cache_new_messages(new_messages):
+            print('Updating cache for new messages')
 
-        print('Updating cache for new')
-        total_new = 0
-        for (uid, flags, envelope) in new_messages:
-            cached = self.cache.get_message(uid, folder)
-            if not cached:
-                print(f'[debug] inserting {uid}')
-                self.cache.insert_message(
-                    uid,
-                    folder,
-                    envelope.from_addr,
-                    envelope.from_name,
-                    envelope.subject,
-                    envelope.date_ts,
-                    flags)
-                total_new += 1
-        print(f'Added {total_new} new messages to cache')
+            new = 0
+            for (uid, flags, envelope) in new_messages:
+                cached = self.cache.get_message(uid, folder)
+                if not cached:
+                    print(f'[debug] inserting {uid}')
+                    self.cache.insert_message(
+                        uid,
+                        folder,
+                        envelope.from_addr,
+                        envelope.from_name,
+                        envelope.subject,
+                        envelope.date_ts,
+                        flags)
+                    new += 1
 
-        if last_seen_uid:
-            old_messages = _fetch_old_messages()
-            total_updated = 0
+            print(f'Added {new} new messages to cache')
+            return new
 
-            print('Updating cache for old')
+        def _update_cache_old_messages(old_messages):
+            print('Updating cache for old messages')
+
+            updated = 0
             for (uid, flags) in old_messages:
                 cached = self.cache.get_message(uid, folder)
                 if cached:
@@ -202,10 +196,22 @@ class EmailImapClient:
                         print(f"New flags: {flags}")
 
                         self.cache.update_flags(uid, folder, flags)
-                        total_updated += 1
+                        updated += 1
                 else:
                     click.echo(f"UID {uid} not found in cache!")
                     print(flags)
+
+            print(f'Added {updated} new messages to cache')
+            return updated
+
+        total_new = 0
+        for new_messages_page in _fetch_new_messages():
+            total_new += _update_cache_new_messages(new_messages_page)
+
+        if last_seen_uid:
+            total_updated = 0
+            old_messages = _fetch_old_messages()
+            total_updated += _update_cache_old_messages(old_messages)
 
         # Detect expunged
         total_expunged = 0
