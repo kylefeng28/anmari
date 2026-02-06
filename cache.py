@@ -1,5 +1,7 @@
+import click
 import sqlite3
 from typing import NamedTuple, Optional
+from datetime import datetime, timedelta
 
 from search import parse_search_query
 from utils import decode_if_bytes
@@ -86,7 +88,7 @@ class EmailCache:
             );
             CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
             CREATE INDEX IF NOT EXISTS idx_tags_message ON tags(uid, folder);
-            
+
             CREATE TABLE IF NOT EXISTS gm_labels (
                 uid INTEGER NOT NULL,
                 folder TEXT NOT NULL,
@@ -268,3 +270,44 @@ class EmailCache:
             (uid, folder)
         )
         return [row[0] for row in cur.fetchall()]
+
+    def cleanup_old_messages(self, direction: str, days: int, folder=None, interactive=False) -> int:
+        """Delete messages newer/older than days
+
+        Returns:
+            Number of messages deleted
+        """
+
+        # Calculate cutoff date
+        cutoff = datetime.now() - timedelta(days=days)
+        cutoff_str = cutoff.strftime('%Y-%m-%d %H:%M:%S')
+
+        op = None
+        if direction == 'older':
+            op = '<'
+        elif direction == 'newer':
+            op = '>'
+        else:
+            raise 'unknown direction'
+        folder_cond = 'AND folder = ?' if folder else ''
+        params = (folder, cutoff_str,) if folder else (cutoff_str,)
+
+        # Count messages to delete
+        cur = self.conn.execute(
+            f"SELECT COUNT(*) FROM messages WHERE date {op} ? {folder_cond}",
+            params
+        )
+        count = cur.fetchone()[0]
+
+        if count > 0:
+            if interactive:
+                click.confirm(f'Really delete {count} messages? ', abort=True)
+
+            # Delete old messages (CASCADE will delete tags and gm_labels)
+            self.conn.execute(
+                f"DELETE FROM messages WHERE date {op} ? {folder_cond}",
+                params
+            )
+            self.conn.commit()
+
+        return count

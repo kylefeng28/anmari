@@ -15,6 +15,9 @@ from imap_client import EmailImapClient
 from repl import repl as anmari_repl
 
 
+DEFAULT_FOLDER = 'INBOX'
+DEFAULT_CACHE_DAYS = 90
+
 # Commands
 @click.group()
 def cli():
@@ -22,16 +25,46 @@ def cli():
     pass
 
 
+@cli.group()
+def cache():
+    pass
+
+
+@cache.command()
+@click.option('--account', '-a', default=0, help='Account index')
+@click.option('--days-older', type=int, help='Clear cache older than this many days')
+@click.option('--days-newer', type=int, help='Clear cache newer than this many days')
+@click.option('--folder', '-f', default=None, help='Folder to clean up (optional, default all)')
+def clear(account: int, days_older: int, days_newer: int, folder: str):
+    """Delete messages older/newer than specified days"""
+    config = AccountConfig(account)
+
+    if (days_newer and days_older) or (not days_newer and not days_older):
+        raise click.UsageError("Must specify one of --days-older or --days-newer")
+
+    direction = 'older' if days_older else 'newer'
+    days = days_older or days_newer
+
+    # Initialize cache and email client
+    cache = EmailCache(account, config.get('cache_days', DEFAULT_CACHE_DAYS))
+    count = cache.cleanup_old_messages(direction, days, folder, interactive=True)
+
+    if count > 0:
+        click.echo(f"Deleted {count} messages {direction} than {days} days")
+    else:
+        click.echo(f"No messages {direction} than {days} days found")
+
+
 @cli.command()
 @click.option('--account', '-a', default=0, help='Account index')
-@click.option('--folder', '-f', default='INBOX', help='Folder to sync')
-@click.option('--page-size', default=100, help='Page size for fetching')
+@click.option('--folder', '-f', default=DEFAULT_FOLDER, help='Folder to sync')
+@click.option('--page-size', type=int, default=100, help='Page size for fetching')
 def sync(account: int, folder: str, page_size: int):
     """Sync emails from IMAP to local cache"""
     config = AccountConfig(account)
 
     # Initialize cache and email client
-    cache = EmailCache(account, config.get('cache_days', 90))
+    cache = EmailCache(account, config.get('cache_days', DEFAULT_CACHE_DAYS))
     imap_host, imap_port, email_addr = config.get('imap_host'), config.get('imap_port'), config.get('email')
     password = config.get_password()
     email_client = EmailImapClient(imap_host, imap_port, email_addr, password, cache)
@@ -41,8 +74,8 @@ def sync(account: int, folder: str, page_size: int):
 
 @cli.command()
 @click.option('--account', '-a', default=0, help='Account index')
-@click.option('--folder', '-f', default='INBOX', help='Folder to search')
-@click.option('--limit', '-l', default=20, help='Limit results')
+@click.option('--folder', '-f', default=DEFAULT_FOLDER, help='Folder to search')
+@click.option('--limit', '-l', type=int, default=20, help='Limit results')
 @click.option('--all', is_flag=True, help='Show all results')
 @click.argument('query', nargs=-1, required=True)
 def search(account: int, folder: str, limit: int, all: bool, query: tuple):
@@ -79,7 +112,7 @@ def repl():
 
 @cli.command()
 @click.option('--account', '-a', default=0, help='Account index')
-@click.option('--folder', '-f', default='INBOX', help='Folder to apply tags')
+@click.option('--folder', '-f', default=DEFAULT_FOLDER, help='Folder to apply tags')
 @click.argument('tags_and_query', nargs=-1, required=True)
 def tag(account: int, folder: str, tags_and_query: tuple):
     """Apply local tags to messages matching a query
