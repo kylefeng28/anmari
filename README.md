@@ -1,158 +1,249 @@
 # anmari (あんまり)
 
-An email tagging system, similar to [notmuch](https://notmuchmail.org/) but can connect to without requiring Maildir (i.e. avoiding mbsync/offlineimap + a large local Maildir + lieer for tag synchronization for Gmail).
+An email tagging system, similar to [notmuch](https://notmuchmail.org/) but can connect to IMAP directly without requiring Maildir (i.e. avoiding mbsync/offlineimap + a large local Maildir + lieer for tag synchronization for Gmail).
 
-It features a minimal email cache with selective body storage - keep headers forever, bodies for a set amount of time days (e.g. 90 days).
+It features a minimal email cache with selective body storage - keep headers forever, bodies for a set amount of time (e.g. 90 days).
 
-Written in Rust using [email-lib](https://crates.io/crates/email-lib).
+Written in Python using [IMAPClient](https://imapclient.readthedocs.io/).
 
 ## Features
 
 - **Selective caching**: Store headers always, full bodies only for recent emails (configurable days)
 - **Tag system**: notmuch-style tagging for organizing emails
-- **Search**: Query by sender, subject, or body preview
-- **Automatic cleanup**: Remove old message bodies while keeping headers
+- **Search**: Query by sender, subject, date, tags, Gmail labels, and more
+- **Action queue**: Git-like staging for IMAP operations (move, flag, label)
+- **Gmail support**: X-GM-LABELS, CONDSTORE for efficient sync
+- **Threaded sync**: Parallel folder syncing with progress bars
 
 ## CLI Usage
 
-### Add an account
+### Setup
 
 ```bash
-anmari add-account \
-  --email user@example.com \
-  --imap-host imap.example.com \
-  --imap-port 993 \
-  --cache-days 90 \
-  --password "your-password"
+# Install dependencies
+pip install imapclient click rich tqdm dateparser prompt-toolkit
 ```
 
 ### Sync emails to cache
 
-Fetch emails from IMAP and store in local cache:
-
 ```bash
-# Sync default account's INBOX
-anmari sync
-
-# Sync specific account
-anmari sync --account 0
+# Sync INBOX
+./anmari.py sync
 
 # Sync specific folder
-anmari sync --folder "Sent"
+./anmari.py sync --folder "Sent"
 
-# Custom page size (default: 100)
-anmari sync --page-size 50
+# Sync all folders (threaded)
+./anmari.py sync --all-folders
+
+# Sync with more threads
+./anmari.py sync --all-folders --threads 8
+
+# Custom page size
+./anmari.py sync --page-size 50
 ```
-
-The sync command:
-- Auto-paginates through all pages
-- Fetches all envelopes (headers) from the folder
-- Stores subject, from, date, and flags in the cache
-- Skips messages already in cache
-- Shows progress per page
 
 ### Search emails
 
-Search the local cache (default) or IMAP server:
+Search with powerful query syntax:
 
 ```bash
-# Search cache by subject (simple query)
-anmari search "meeting"
+# Simple search
+./anmari.py search "meeting"
 
-# Search cache with specific folder
-anmari search --folder "Sent" "invoice"
+# Field-specific search
+./anmari.py search 'subject:"project update"'
+./anmari.py search 'from:boss@company.com'
 
-# Search on IMAP server (single page)
-anmari search --server "meeting"
+# Date filters
+./anmari.py search 'date:yesterday'
+./anmari.py search 'date:2024-01-01..2024-12-31'
+./anmari.py search 'since:"1 week ago"'
 
-# Search server with pagination
-anmari search --server --page 0 "meeting"
-anmari search --server --page 1 "meeting"
+# Status filters
+./anmari.py search 'is:unread'
+./anmari.py search 'is:read'
 
-# Auto-paginate through all results on server
-anmari search --server --auto-paginate "meeting"
+# Tag filters (local tags)
+./anmari.py search 'tag:newsletter'
+./anmari.py search 'tag:important'
 
-# Custom page size
-anmari search --server --page-size 50 "meeting"
+# Gmail label filters
+./anmari.py search 'label:INBOX'
+./anmari.py search 'label:Important'
+
+# Logical operators
+./anmari.py search 'from:alice OR from:bob'
+./anmari.py search 'subject:invoice AND is:unread'
+./anmari.py search 'tag:newsletter NOT from:spam'
+
+# Complex queries
+./anmari.py search 'from:boss subject:urgent is:unread date:yesterday'
+./anmari.py search '(tag:work OR tag:important) AND is:unread'
 ```
 
-**Cache search** (default):
-- Fast local SQLite queries
-- Works offline
-- Searches: subject, from fields
-- Supports basic filters: `Subject`, `From`, `And`, `Or`
+**Supported filters:**
+- `subject:"text"` - Search in subject
+- `from:"text"` - Search in from address/name
+- `body:"text"` - Search in body preview
+- `tag:tagname` - Filter by local tag
+- `label:labelname` - Filter by Gmail label
+- `is:read` / `is:unread` - Read status
+- `date:YYYY-MM-DD` - Specific date
+- `date:start..end` - Date range
+- `since:"relative date"` - Relative dates (yesterday, "1 week ago", etc.)
+- `uid:123` or `uid:100..200` - UID search
+- Operators: `AND`, `OR`, `NOT`
 
-**Server search** (with `--server` flag):
-- Queries IMAP directly
-- Always up-to-date
-- Slower, requires connection
-- Supports pagination with `--page` and `--auto-paginate`
+### Tagging
 
-### List accounts
+Apply local tags to messages:
 
+**Syntax**:
 ```bash
-anmari list-accounts
+./anmari.py tag +tag_to_add search_query
+./anmari.py tag -- +tag_to_add -tag_to_remove search_query
 ```
 
-### Show config path
+The `--` is optional if only adding tags, but must be included if removing tags so that the `-` is not parsed as a CLI option.
+
+**Examples**:
 
 ```bash
-anmari config-path
+# Add tags
+./anmari.py tag -- +newsletter from:substack.com
+./anmari.py tag -- +work +important subject:urgent
+
+# Remove tags
+./anmari.py tag -- -inbox +archived tag:old
+
+# Multiple operations
+./anmari.py tag -- +newsletter -inbox 'from:"The New York Times"'
+```
+
+### Action Queue (Staging)
+
+Queue IMAP operations locally, review them, then apply to server:
+
+```bash
+# Queue operations
+./anmari.py queue move --to Newsletters tag:newsletter
+./anmari.py queue archive tag:old # alias for ./anmari.py queue move --to '[Gmail]/All Mail'
+./anmari.py queue flag --add Seen date:yesterday
+./anmari.py queue flag --remove Flagged tag:spam
+./anmari.py queue label --add Tax from:turbotax.com
+./anmari.py queue label --remove Inbox tag:archived
+
+# Review pending actions
+./anmari.py status
+
+# Preview without executing
+./anmari.py apply --dry-run
+
+# Apply all pending actions
+./anmari.py apply
+
+# Manage queue
+./anmari.py queue clear
+./anmari.py queue undo --count 3
+```
+
+**Supported actions:**
+- `move` - Move messages to folder
+- `flag --add/--remove` - Add/remove IMAP flags (Seen, Flagged, Deleted)
+- `label --add/--remove` - Add/remove Gmail labels
+- `markread/markunread` - Alias for `flag --add/--remove '\\Seen'`
+- `archive` - Alias for `move '[Gmail]/All Mail'`
+
+### Other commands
+
+```bash
+# List all folders
+./anmari.py folders
+
+# Cleanup old messages
+./anmari.py cleanup
+
+# Interactive REPL
+./anmari.py repl
+```
+
+### Interactive REPL
+
+Start an interactive session with command history and tab completion:
+
+```bash
+./anmari.py repl
+
+anmari> search is:unread
+anmari> tag -- +important from:boss
+anmari> queue move --to Newsletters tag:newsletter
+anmari> queue archive tag:old # alias for move --to '[Gmail]/All Mail'
+anmari> status
+anmari> apply
+anmari> exit
 ```
 
 ## Configuration
 
-Config is stored at `~/.config/anmari/config.toml` (or platform equivalent):
+Config is stored at `~/.config/anmari/config.toml`:
 
 ```toml
 [[accounts]]
 email = "user@example.com"
-imap_host = "imap.example.com"
+imap_host = "imap.gmail.com"
 imap_port = 993
 cache_days = 90
 ```
 
-## Library Usage
+## Examples
 
-```rust
-use anmari::{CachedMessage, CacheConfig, EmailCache};
-use chrono::Utc;
-
-// Initialize cache
-let config = CacheConfig {
-    db_path: "emails.db".to_string(),
-    cache_days: 90,
-};
-let cache = EmailCache::new(config)?;
-
-// Insert a message
-let msg = CachedMessage {
-    uid: 1,
-    folder: "INBOX".to_string(),
-    from: "sender@example.com".to_string(),
-    subject: "Important Email".to_string(),
-    date: Utc::now(),
-    body_preview: Some("First 200 chars...".to_string()),
-    full_body: Some("Full email body".to_string()),
-    flags: vec!["\\Seen".to_string()],
-};
-cache.insert_message(&msg)?;
-
-// Add tags
-cache.add_tag(1, "INBOX", "important")?;
-
-// Search
-let results = cache.search("Important")?;
-let work_emails = cache.search_by_tag("work")?;
-
-// Cleanup old bodies
-cache.cleanup_old_bodies()?;
-```
-
-## Building
+### Workflow: Process newsletters
 
 ```bash
-cargo build --release
+# Search for newsletters
+./anmari.py search 'from:substack.com OR subject:newsletter'
+
+# Tag them
+./anmari.py tag -- +newsletter 'from:substack.com OR subject:newsletter'
+
+# Queue move to Newsletter folder
+./anmari.py queue move --to Newsletters tag:newsletter
+
+# Review and apply
+./anmari.py status
+./anmari.py apply
 ```
 
-The binary will be at `target/release/anmari`.
+### Workflow: Archive old read messages
+
+```bash
+# Find old read messages
+./anmari.py search 'is:read date:2024-01-01..2024-06-30'
+
+# Tag for archiving
+./anmari.py tag -- +archive 'is:read date:2024-01-01..2024-06-30'
+
+# Queue archive operation
+./anmari.py queue move --to Archive tag:archive
+
+# Apply
+./anmari.py apply
+```
+
+### Workflow: Mark spam
+
+```bash
+# Search for spam
+./anmari.py search 'from:suspicious@spam.com'
+
+# Tag as spam
+./anmari.py tag -- +spam 'from:suspicious@spam.com'
+
+# Queue move to Trash and add label
+./anmari.py queue move --to Trash tag:spam
+./anmari.py queue label --add Spam tag:spam
+
+# Apply
+./anmari.py apply
+```

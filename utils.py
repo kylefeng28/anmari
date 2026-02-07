@@ -9,7 +9,10 @@ def decode_if_bytes(maybe_bytes):
 
 def format_datetime_sqlite(dt: datetime) -> str:
     # Format datetime as UTC YYYY-MM-DD H:M:S without Z (zulu) or timestamp
-    return dt.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    if dt:
+        return dt.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    else:
+        return 0
 
 def parse_datestr(date_str: str) -> datetime:
     """Parse date string to datetime object

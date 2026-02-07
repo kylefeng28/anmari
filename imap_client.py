@@ -36,7 +36,9 @@ def decode_header_value(value):
     parts = []
     for content, encoding in decoded:
         if isinstance(content, bytes):
-            parts.append(content.decode(encoding or 'utf-8', errors='ignore'))
+            if encoding == 'unknown-8bit' or not encoding:
+                encoding = 'utf-8'
+            parts.append(content.decode(encoding, errors='ignore'))
         else:
             parts.append(content)
     return " ".join(parts)
@@ -72,7 +74,12 @@ def parse_header(data):
     date_str = msg.get('Date', '')
 
     # Parse date
-    date = email.utils.parsedate_to_datetime(date_str)
+    # TODO: figure out what to do if we can't parse the date.
+    # Currently defaulting to serializing as 0 in sqlite
+    try:
+        date = email.utils.parsedate_to_datetime(date_str)
+    except:
+        date = None
     return Envelope(from_addr, from_name, subject, date)
 
 
