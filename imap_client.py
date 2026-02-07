@@ -5,6 +5,7 @@ from email.utils import parseaddr
 from datetime import datetime, timedelta
 from typing import NamedTuple
 import click
+from contextlib import contextmanager
 
 from utils import decode_if_bytes
 
@@ -123,7 +124,6 @@ class EmailImapClient:
 
     def get_unread_messages(self):
         return self.client.search('UNSEEN')
-
 
     def get_uids(self, cond='ALL'):
         """Get UIDs. e.g. ALL or a range (e.g., 'UID 123:*' or 'UID 1:500')"""
@@ -353,3 +353,60 @@ class EmailImapClient:
             print(f"\nSync complete! New: {total_new}, Updated: {total_updated}, Expunged: {total_expunged}")
         else:
             print(f"\nInitial sync complete! New: {total_new}")
+
+    ################################################################################
+    # WRITE, READONLY=FALSE OPERATIONS
+    ################################################################################
+    @contextmanager
+    def select_folder_write(self, folder):
+        """Temporarily select a folder as writable, then restore readonly mode."""
+        self.client.select_folder(folder, readonly=False)
+        try:
+            yield
+        finally:
+            self.client.select_folder(folder, readonly=True)
+
+    def add_flags(self, uids: list, folder: str, flags: list):
+        """Add IMAP flags to messages"""
+        with self.select_folder_write(folder):
+            # Convert string flags to bytes
+            flag_bytes = [f.encode() if isinstance(f, str) else f for f in flags]
+            self.client.add_flags(uids, flag_bytes)
+
+    def remove_flags(self, uids: list, folder: str, flags: list):
+        """Remove IMAP flags from messages"""
+        with self.select_folder_write(folder):
+            flag_bytes = [f.encode() if isinstance(f, str) else f for f in flags]
+            self.client.remove_flags(uids, flag_bytes)
+
+    def add_gmail_labels(self, uids: list, folder: str, labels: list):
+        """Add Gmail labels to messages"""
+        if not self.is_gmail:
+            raise Exception("Gmail labels not supported on this server")
+
+        with self.select_folder_write(folder):
+            self.client.add_gmail_labels(uids, labels)
+
+    def remove_gmail_labels(self, uids: list, folder: str, labels: list):
+        """Remove Gmail labels from messages"""
+        if not self.is_gmail:
+            raise Exception("Gmail labels not supported on this server")
+
+        with self.select_folder_write(folder):
+            self.client.remove_gmail_labels(uids, labels)
+            highestmodseq = response.get(HIGHESTMODSEQ_b, 0) if self.has_condstore else 0
+            return uidvalidity, highestmodseq
+
+    def move_messages(self, uids: list, source_folder: str, dest_folder: str):
+        """Move messages to another folder (COPY + DELETE + EXPUNGE)"""
+        with self.select_folder_write(folder):
+            # Copy to destination
+            self.client.copy(uids, dest_folder)
+
+            # Mark as deleted
+            self.client.delete_messages(uids)
+
+            # Expunge deleted messages
+            self.client.expunge()
+
+            # TODO: can optimize by preventing (delete from local cache + download message from server) by using COPYUID

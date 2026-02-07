@@ -103,6 +103,18 @@ class EmailCache:
             );
             CREATE INDEX IF NOT EXISTS idx_gm_labels_label ON gm_labels(label);
             CREATE INDEX IF NOT EXISTS idx_gm_labels_message ON gm_labels(uid, folder);
+
+            CREATE TABLE IF NOT EXISTS action_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                query TEXT NOT NULL,
+                folder TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                action_data TEXT NOT NULL,
+                message_count INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                status TEXT DEFAULT 'pending'
+            );
+            CREATE INDEX IF NOT EXISTS idx_action_queue_status ON action_queue(status);
         """)
         self.conn.commit()
 
