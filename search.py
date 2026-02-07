@@ -113,6 +113,15 @@ def _parse_token(token: str) -> tuple[str, list, str]:
     if ':' in token:
         field, value = token.split(':', 1)
 
+        # UID search
+        if field == 'uid':
+            # Range: date:2024-01-01..2024-12-31
+            if '..' in value:
+                start, end = value.split('..', 1)
+                return "m.uid BETWEEN ? AND ?", [start, end], NONE
+            else:
+                return "m.uid = ?", [value], NONE
+
         # Tag search
         if field == 'tag':
             return "t.tag = ?", [value], set([TAG])
