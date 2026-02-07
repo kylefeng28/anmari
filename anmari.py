@@ -13,6 +13,7 @@ from config import AccountConfig
 from cache import EmailCache
 from imap_client import EmailImapClient
 from action_queue import ActionQueue, QueuedAction
+from sync_manager import SyncManager
 from repl import repl as anmari_repl, PipeContext
 from utils import decode_if_bytes
 
@@ -22,6 +23,7 @@ DEFAULT_CACHE_DAYS = 90
 
 SEEN = '\\Seen'
 
+GMAIL_ALL_MAIL = '[Gmail]/All Mail'
 
 pass_pipe_ctx = click.make_pass_decorator(PipeContext, ensure=True)
 
@@ -64,7 +66,8 @@ def clear(account: int, days: int, folder: str, all_folders: bool):
 @click.option('--folder', '-f', default=DEFAULT_FOLDER, help='Folder to sync')
 @click.option('--page-size', type=int, default=100, help='Page size for fetching')
 @click.option('--all-folders', is_flag=True, help='Sync all folders')
-def sync(account: int, folder: str, page_size: int, all_folders: bool):
+@click.option('--workers', '-n', type=int, default=4, help='Number of concurrent workers for --all-folders')
+def sync(account: int, folder: str, page_size: int, all_folders: bool, workers: int):
     """Sync emails from IMAP to local cache"""
 
     # Initialize cache and email client
@@ -77,18 +80,16 @@ def sync(account: int, folder: str, page_size: int, all_folders: bool):
     if all_folders:
         # Get list of all folders
         folders = email_client.list_folders()
-        folder_names = [name for flags, delimiter, name in folders]
+        folder_names = [name for flags, delimiter, name in folders if b'\\HasNoChildren' in flags ]
 
-        click.echo(f"Syncing {len(folder_names)} folders...")
-        for folder_name in folder_names:
-            click.echo(f"\n{'='*60}")
-            click.echo(f"Syncing folder: {folder_name}")
-            click.echo('='*60)
-            try:
-                email_client.sync_from_server(folder_name, page_size)
-            except Exception as e:
-                click.echo(f"Error syncing {folder_name}: {e}", err=True)
-                continue
+        click.echo(f"Syncing {len(folder_names)} folders with {workers} workers...")
+
+        # Use threaded sync manager
+        sync_manager = SyncManager(max_workers=workers)
+        sync_manager.sync_all_folders(config, account, folder_names, page_size)
+
+        # Print summary
+        sync_manager.print_summary()
     else:
         email_client.sync_from_server(folder, page_size)
 
@@ -153,6 +154,7 @@ def search(pipe_ctx: PipeContext, account: int, folder: str, limit: int, all: bo
 
         # Tags
         tags = '+' + ', +'.join(cache.get_tags(msg.uid, folder))
+        tags += msg.flags
 
         table.add_row(
             str(msg.uid),
@@ -262,13 +264,7 @@ def queue():
     pass
 
 
-@queue.command('move')
-@click.option('--account', '-a', default=0, help='Account index')
-@click.option('--folder', '-f', default=DEFAULT_FOLDER, help='Source folder')
-@click.option('--to', required=True, help='Destination folder')
-@click.argument('query', nargs=-1, required=True)
-def queue_move(account: int, folder: str, to: str, query: tuple):
-    """Queue move operation"""
+def _queue_move(account: int, folder: str, to: str, query: tuple):
     config = AccountConfig(account)
     cache = EmailCache(account, config.get('cache_days', 90))
     action_queue = ActionQueue(cache)
@@ -286,6 +282,24 @@ def queue_move(account: int, folder: str, to: str, query: tuple):
     )
 
     click.echo(f'Queued action #{action_id}: {action_queue.get_action(action_id).describe()}')
+
+
+@queue.command('move')
+@click.option('--account', '-a', default=0, help='Account index')
+@click.option('--folder', '-f', default=DEFAULT_FOLDER, help='Source folder')
+@click.option('--to', required=True, help='Destination folder')
+@click.argument('query', nargs=-1, required=True)
+def queue_move(account: int, folder: str, to: str, query: tuple):
+    """Queue move operation"""
+    _queue_move(account, folder, to, query)
+
+@queue.command('archive')
+@click.option('--account', '-a', default=0, help='Account index')
+@click.option('--folder', '-f', default=DEFAULT_FOLDER, help='Source folder')
+@click.argument('query', nargs=-1, required=True)
+def queue_archive(account: int, folder: str, query: tuple):
+    """Queue archive operation (Gmail only)"""
+    _queue_move(account, folder, GMAIL_ALL_MAIL, query)
 
 
 def _queue_flag(account: int, folder: str, add: tuple, remove: tuple, query: tuple):

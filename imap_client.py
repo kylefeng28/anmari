@@ -354,6 +354,13 @@ class EmailImapClient:
         else:
             print(f"\nInitial sync complete! New: {total_new}")
 
+        # Return stats for threaded sync
+        return {
+            'new': total_new,
+            'updated': total_updated if last_seen_uid else 0,
+            'expunged': total_expunged
+        }
+
     ################################################################################
     # WRITE, READONLY=FALSE OPERATIONS
     ################################################################################
@@ -371,12 +378,14 @@ class EmailImapClient:
         with self.select_folder_write(folder):
             # Convert string flags to bytes
             flag_bytes = [f.encode() if isinstance(f, str) else f for f in flags]
+            # print(f'[debug] add flags to uids {uids}')
             self.client.add_flags(uids, flag_bytes)
 
     def remove_flags(self, uids: list, folder: str, flags: list):
         """Remove IMAP flags from messages"""
         with self.select_folder_write(folder):
             flag_bytes = [f.encode() if isinstance(f, str) else f for f in flags]
+            # print(f'[debug] remove flags from uids {uids}')
             self.client.remove_flags(uids, flag_bytes)
 
     def add_gmail_labels(self, uids: list, folder: str, labels: list):
@@ -385,6 +394,7 @@ class EmailImapClient:
             raise Exception("Gmail labels not supported on this server")
 
         with self.select_folder_write(folder):
+            # print(f'[debug] add gmail labels to uids {uids}')
             self.client.add_gmail_labels(uids, labels)
 
     def remove_gmail_labels(self, uids: list, folder: str, labels: list):
@@ -393,13 +403,14 @@ class EmailImapClient:
             raise Exception("Gmail labels not supported on this server")
 
         with self.select_folder_write(folder):
+            # print(f'[debug] remove gmail labels from uids {uids}')
             self.client.remove_gmail_labels(uids, labels)
-            highestmodseq = response.get(HIGHESTMODSEQ_b, 0) if self.has_condstore else 0
-            return uidvalidity, highestmodseq
 
     def move_messages(self, uids: list, source_folder: str, dest_folder: str):
         """Move messages to another folder (COPY + DELETE + EXPUNGE)"""
-        with self.select_folder_write(folder):
+        with self.select_folder_write(source_folder):
+            # print(f'[debug] move uids {uids} from {source_folder} to {dest_folder}')
+
             # Copy to destination
             self.client.copy(uids, dest_folder)
 
