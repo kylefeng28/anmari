@@ -169,22 +169,15 @@ class EmailCache:
 
     def search(self, folder: Optional[str], query: str | list[str]) -> List[CachedMessage]:
         """Search messages using a notmuch-style query"""
-        conditions, params, has_tag_filter = parse_search_query(query)
+        conditions, params, join_clauses = parse_search_query(query)
 
-        # If query includes tag filter, join with tags table
-        if has_tag_filter:
-            sql = f"""SELECT DISTINCT m.*
-                      FROM messages m
-                      LEFT JOIN tags t ON m.uid = t.uid AND m.folder = t.folder
-                      WHERE m.folder = ? AND ({conditions})
-                      ORDER BY m.date DESC"""
-        else:
-            sql = f"""SELECT *
-                      FROM messages m
-                      WHERE folder = ? AND ({conditions})
-                      ORDER BY date DESC"""
+        sql = f"""SELECT DISTINCT m.*
+                  FROM messages m
+                  {join_clauses}
+                  WHERE m.folder = ? AND ({conditions})
+                  ORDER BY m.date DESC"""
 
-        print(f'[debug] {conditions}, {params}')
+        print(f'[debug] {conditions}, {params}, {join_clauses}')
 
         cur = self.conn.execute(sql, [folder] + params)
         return [CachedMessage.from_row(row) for row in cur.fetchall()]
