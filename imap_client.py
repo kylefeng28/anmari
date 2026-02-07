@@ -90,6 +90,8 @@ class EmailImapClient:
         print(f'Logging in as {email_addr} to IMAP server {host}:{port}')
         self.client.login(email_addr, password)
 
+        # print(f'[debug] Capabilities: {self.client.capabilities()}')
+
         # Check and enable CONDSTORE capability
         self.has_condstore = self.client.has_capability('CONDSTORE')
         if self.has_condstore:

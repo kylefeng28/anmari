@@ -96,6 +96,10 @@ def sync(account: int, folder: str, page_size: int, all_folders: bool):
 @click.argument('query', nargs=-1, required=True)
 def search(account: int, folder: str, limit: int, all: bool, query: tuple):
     """Search emails in local cache"""
+    from rich.console import Console
+    from rich.table import Table
+    from datetime import datetime
+    
     # Initialize cache
     config = AccountConfig(account)
     cache = EmailCache(account, config.get('cache_days', 90))
@@ -105,18 +109,55 @@ def search(account: int, folder: str, limit: int, all: bool, query: tuple):
 
     display_limit = len(results) if all else limit
 
-    click.echo(f"Found {len(results)} messages in cache:")
+    # Create table
+    console = Console()
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("ID", style="red", width=8)
+    table.add_column("FLAGS", width=6)
+    table.add_column("SUBJECT", style="green", no_wrap=False)
+    table.add_column("FROM", style="blue", width=35)
+    table.add_column("DATE", style="yellow", width=20)
+    table.add_column("", width=20)
+
     for msg in results[:display_limit]:
-        date = msg.date
-        from_display = f'{formataddr((msg.from_name, msg.from_addr))}' if msg.from_name else msg.from_addr
-        gm_labels = cache.get_gm_labels(msg.uid, folder)
-        display = f"  [{msg.uid}] {date} {from_display} - {msg.subject}"
-        if gm_labels:
-            display += f"  [labels: {gm_labels}]"
-        click.echo(display)
+        # Format flags
+        flags = "*" if "\\Seen" not in msg.flags else ""
+
+        # Format from
+        from_display = msg.from_name if msg.from_name else msg.from_addr
+
+        # Format date
+        try:
+            date_obj = datetime.fromisoformat(msg.date)
+            date_str = date_obj.strftime("%Y-%m-%d %H:%M")
+        except:
+            date_str = str(msg.date)
+
+        # Truncate subject if too long
+        subject = msg.subject
+        if len(subject) > 60:
+            subject = subject[:57] + "..."
+
+        # Labels
+        labels = '\n'.join(cache.get_gm_labels(msg.uid, folder))
+
+        # Tags
+        tags = '+' + ', +'.join(cache.get_tags(msg.uid, folder))
+
+        table.add_row(
+            str(msg.uid),
+            flags,
+            subject,
+            from_display,
+            date_str,
+            '\n\n'.join([labels, tags]),
+        )
+
+    console.print(f"\nFound {len(results)} messages in cache:")
+    console.print(table)
 
     if len(results) > display_limit:
-        click.echo(f"  ... and {len(results) - display_limit} more")
+        console.print(f"... and {len(results) - display_limit} more")
 
 
 @cli.command()
