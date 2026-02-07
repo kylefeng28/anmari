@@ -33,30 +33,23 @@ def cache():
 
 @cache.command()
 @click.option('--account', '-a', default=0, help='Account index')
-@click.option('--days-older', type=int, help='Clear cache older than this many days')
-@click.option('--days-newer', type=int, help='Clear cache newer than this many days')
-@click.option('--folder', '-f', help="Folder to clean up")
+@click.option('--days', type=int, help='Number of days to clean up (e.g. 3 will clean up the last 3 days)')
+@click.option('--folder', '-f', default=DEFAULT_FOLDER, help="Folder to clean up")
 @click.option('--all-folders', is_flag=True, help='Sync all folders')
-def clear(account: int, days_older: int, days_newer: int, folder: str, all_folders: bool):
+def clear(account: int, days: int, folder: str, all_folders: bool):
     """
-    Delete cache older/newer than the specified number of days.
+    Clean up the most recent messages from cache
     """
-
-    if (days_newer and days_older) or (not days_newer and not days_older):
-        raise click.UsageError("Must specify one of --days-older or --days-newer")
-
-    direction = 'older' if days_older else 'newer'
-    days = days_older or days_newer
 
     # Initialize cache and email client
     config = AccountConfig(account)
     cache = EmailCache(account, config.get('cache_days', DEFAULT_CACHE_DAYS))
-    count = cache.cleanup_old_messages(direction, days, folder, all_folders, interactive=True)
+    count = cache.cleanup_recent(days, folder, all_folders, interactive=True)
 
     if count > 0:
-        click.echo(f"Deleted {count} messages {direction} than {days} days")
+        click.echo(f"Deleted {count} messages from the most {days} days")
     else:
-        click.echo(f"No messages {direction} than {days} days found")
+        click.echo(f"No messages newer than {days} days found")
 
 
 @cli.command()

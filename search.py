@@ -1,8 +1,6 @@
 import re
 import shlex
-from datetime import datetime, timedelta
-import dateparser
-
+from utils import parse_datestr, format_datetime_sqlite
 
 def parse_search_query(query: str | list[str]) -> tuple[str, list, bool]:
     """Parse notmuch-style query into SQL WHERE clause
@@ -91,32 +89,14 @@ def parse_search_query(query: str | list[str]) -> tuple[str, list, bool]:
     return ' '.join(conditions), params, has_tag_filter
 
 
-def _parse_date(date_str: str) -> int:
-    """Parse date string to Unix timestamp
-
-    Supports:
-    - Absolute: 2024-01-01, 2024-01-01T10:30:00
-    - Relative: yesterday, today, "1 week ago", "2 days ago"
-    - Combined: "yesterday 5pm", "2024-01-01 + 1 week"
-    """
-    date_str = date_str.strip('"')
-
-    # Use dateparser for flexible parsing
-    parsed = dateparser.parse(date_str, settings={
-        'PREFER_DATES_FROM': 'past',
-        'RELATIVE_BASE': datetime.now()
-    })
-
-    if not parsed:
-        raise ValueError(f"Could not parse date: {date_str}")
-
-    # Return SQLite datetime format (since dates are stored as TEXT)
-    return parsed.strftime('%Y-%m-%d %H:%M:%S')
+def _parse_date(date_str: str) -> str:
+    parsed = parse_datestr(date_str)
+    return format_datetime_sqlite(parsed)
 
 
 def _parse_token(token: str) -> tuple[str, list, bool]:
     """Parse a single search token into SQL condition
-    
+
     Returns:
         (condition, params, is_tag_filter)
     """

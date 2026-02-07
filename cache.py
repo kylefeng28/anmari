@@ -4,7 +4,7 @@ from typing import NamedTuple, Optional
 from datetime import datetime, timedelta
 
 from search import parse_search_query
-from utils import decode_if_bytes
+from utils import decode_if_bytes, format_datetime_sqlite
 
 def get_db_path(account):
     return f"anmari_{account}.db"
@@ -20,6 +20,7 @@ def normalize_flags_deserialize(flags: str) -> list[str]:
     if flags == '':
         return []
     return sorted(flags.split(' '))
+
 
 class CachedMessage(NamedTuple):
     uid: int
@@ -116,7 +117,7 @@ class EmailCache:
         return CachedMessage.from_row(row) if row else None
 
     def insert_message(self, uid: int, folder: str, from_addr: str, from_name: Optional[str],
-                      subject: str, date: int, flags: str | list[str]):
+                      subject: str, date: str, flags: str | list[str]):
         """Insert or replace message"""
         _require_folder(folder)
         flags = normalize_flags_serialize(flags)
@@ -124,7 +125,7 @@ class EmailCache:
             """INSERT OR REPLACE INTO messages
                (uid, folder, from_addr, from_name, subject, date, body_preview, full_body, flags)
                VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?)""",
-            (uid, folder, from_addr, from_name, subject, date, flags)
+            (uid, folder, from_addr, from_name, subject, format_datetime_sqlite(date), flags)
         )
         self.conn.commit()
 
@@ -300,10 +301,10 @@ class EmailCache:
             "SELECT label FROM gm_labels WHERE uid = ? AND folder = ? ORDER BY label",
             (uid, folder)
         )
-        return [row[0] for row in cur.fetchall()]
+        return sorted([row[0] for row in cur.fetchall()])
 
-    def cleanup_old_messages(self, direction: str, days: int, folder: str, all_folders: bool, interactive=False) -> int:
-        """Delete messages newer/older than days
+    def cleanup_recent(self, days: int, folder: str, all_folders: bool, interactive=False) -> int:
+        """Clean up messages from the last {days} days
 
         Returns:
             Number of messages deleted
@@ -312,23 +313,18 @@ class EmailCache:
             _require_folder(folder)
 
         # Calculate cutoff date
-        cutoff = datetime.now() - timedelta(days=days)
-        cutoff_str = cutoff.strftime('%Y-%m-%d %H:%M:%S')
+        cutoff = (datetime.now() - timedelta(days=days)).replace(hour=0, minute=0, second=0)
+        cutoff_str = format_datetime_sqlite(cutoff)
 
-        op = None
-        if direction == 'older':
-            op = '<'
-        elif direction == 'newer':
-            op = '>'
-        else:
-            raise 'unknown direction'
+        print(f'Cleaning up messages newer than {cutoff_str}')
+        date_cond = 'datetime(date) > datetime(?)'
 
         # Count messages to delete
         folders_to_modify = []
         if all_folders:
             # All folders
             cur = self.conn.execute(
-                f"SELECT COUNT(*), folder FROM messages WHERE date {op} ? GROUP BY folder",
+                f"SELECT COUNT(*), folder FROM messages WHERE {date_cond} GROUP BY folder",
                 (cutoff_str,))
             count_by_folders = {}
             count = 0
@@ -342,7 +338,7 @@ class EmailCache:
         else:
             # Specific folder
             cur = self.conn.execute(
-                f"SELECT COUNT(*) FROM messages WHERE date {op} ? AND folder = ?",
+                f"SELECT COUNT(*) FROM messages WHERE {date_cond} AND folder = ?",
                 (cutoff_str, folder,))
             count = cur.fetchone()[0]
             confirm_msg = f'Really delete {count} messages? '
@@ -358,12 +354,12 @@ class EmailCache:
             # Delete old messages (CASCADE will delete tags and gm_labels)
             if all_folders:
                 self.conn.execute(
-                    f"DELETE FROM messages WHERE date {op} ?",
+                    f"DELETE FROM messages WHERE {date_cond}",
                     (cutoff_str,)
                 )
             else:
                 self.conn.execute(
-                    f"DELETE FROM messages WHERE date {op} ? AND folder = ?",
+                    f"DELETE FROM messages WHERE {date_cond} AND folder = ?",
                     (cutoff_str, folder,)
                 )
             self.conn.commit()

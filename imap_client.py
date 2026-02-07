@@ -47,7 +47,7 @@ def parse_flags(data):
 
 def parse_gm_labels(is_gmail, data):
     if is_gmail and X_GM_LABELS_b in data:
-        return [decode_if_bytes(label) for label in data[X_GM_LABELS_b]]
+        return sorted([decode_if_bytes(label) for label in data[X_GM_LABELS_b]])
     return None
 
 # Convert imapclient.response_types.Envelope into our own Envelope type
@@ -290,20 +290,25 @@ class EmailImapClient:
                     cached_flags = cached.get_flags_as_list()
                     if cached_flags != flags:
                         print(f"Updating UID {uid} in cache")
-                        print(f"Old flags: {cached_flags}")
-                        print(f"New flags: {flags}")
+                        print(f"  Old flags: {cached_flags}")
+                        print(f"  New flags: {flags}")
 
                         self.cache.update_flags(uid, folder, flags)
                         updated += 1
 
                     # Store Gmail labels if available
-                    if gm_labels:
-                        print(f'Updating Gmail labels: {gm_labels}')
+                    cached_gm_labels = self.cache.get_gm_labels(uid, folder)
+                    if cached_gm_labels != gm_labels:
+                        print(f'Updating Gmail labels for {uid} in cache')
+                        print(f'  Old labels: {cached_gm_labels}')
+                        print(f'  New labels: {gm_labels}')
                         self.cache.set_gm_labels(uid, folder, gm_labels)
 
                 else:
                     click.echo(f"UID {uid} not found in cache!")
-                    print(flags)
+                    print((flags, gm_labels))
+                    a = self.client.fetch([uid], 'BODY.PEEK[HEADER]')
+                    print(a)
 
             print(f'Updated {updated} messages in cache')
             return updated
