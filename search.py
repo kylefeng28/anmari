@@ -4,6 +4,7 @@ from utils import parse_datestr, format_datetime_sqlite
 
 NONE = set()
 TAG = 'TAG'
+LABEL = 'LABEL'
 
 def parse_search_query(query: str | list[str]) -> tuple[str, list, bool]:
     """Parse notmuch-style query into SQL WHERE clause
@@ -12,7 +13,8 @@ def parse_search_query(query: str | list[str]) -> tuple[str, list, bool]:
     - subject:"text" - Search in subject
     - from:"text" - Search in from_addr or from_name
     - body:"text" - Search in body_preview
-    - tag:tagname - Search by tag
+    - tag:tagname - Search by local tag
+    - label:labelname - Search by Gmail label
     - is:read / is:unread - Check read status (based on \\Seen flag)
     - date:<since>..<until> - Date range (e.g., date:2024-01-01..2024-12-31)
     - date:<date> - Specific date or relative (e.g., date:yesterday, date:"1 week ago")
@@ -24,13 +26,15 @@ def parse_search_query(query: str | list[str]) -> tuple[str, list, bool]:
     - from:"alice" OR from:"bob"
     - subject:"invoice" NOT from:"spam"
     - tag:newsletter
+    - label:INBOX
+    - label:Important AND is:unread
     - is:unread
     - is:read AND tag:important
     - subject:concert AND tag:events
     - date:2024-01-01..2024-12-31
     - date:yesterday
     - date:"1 week ago"..today
-    
+
     Returns:
         (conditions, params, join_clauses)
     """
@@ -94,6 +98,9 @@ def parse_search_query(query: str | list[str]) -> tuple[str, list, bool]:
     if TAG in tables_required:
         join_clauses.append('LEFT JOIN tags t ON m.uid = t.uid AND m.folder = t.folder')
 
+    if LABEL in tables_required:
+        join_clauses.append('LEFT JOIN gm_labels l ON m.uid = l.uid AND m.folder = l.folder')
+
     return ' '.join(conditions), params, '\n'.join(join_clauses)
 
 
@@ -125,6 +132,10 @@ def _parse_token(token: str) -> tuple[str, list, str]:
         # Tag search
         if field == 'tag':
             return "t.tag = ?", [value], set([TAG])
+
+        # Gmail label search
+        if field == 'label':
+            return "l.label = ?", [value], set([LABEL])
 
         # Read/unread status
         if field == 'is':
