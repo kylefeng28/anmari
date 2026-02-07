@@ -269,19 +269,18 @@ def queue_move(account: int, folder: str, to: str, query: tuple):
     action_queue = ActionQueue(cache)
 
     # Search to get message count
-    query_str = ' '.join(query)
-    results = cache.search(folder, query_str)
+    results = cache.search(folder, query)
 
     # Queue action
     action_id = action_queue.queue_action(
-        query=query_str,
+        query=query,
         folder=folder,
         action_type='move',
         action_data={'dest': to},
         message_count=len(results)
     )
 
-    click.echo(f"Queued action #{action_id}: MOVE {len(results)} messages to {to}")
+    click.echo(f'Queued action #{action_id}: {action_queue.get_action(action_id).describe()}')
 
 
 def _queue_flag(account: int, folder: str, add: tuple, remove: tuple, query: tuple):
@@ -289,8 +288,7 @@ def _queue_flag(account: int, folder: str, add: tuple, remove: tuple, query: tup
     cache = EmailCache(account, config.get('cache_days', 90))
     action_queue = ActionQueue(cache)
 
-    query_str = ' '.join(query)
-    results = cache.search(folder, query_str)
+    results = cache.search(folder, query)
 
     # Normalize flags (add backslash if not present)
     def normalize_flag(f):
@@ -299,24 +297,24 @@ def _queue_flag(account: int, folder: str, add: tuple, remove: tuple, query: tup
     if add:
         flags = [normalize_flag(f) for f in add]
         action_id = action_queue.queue_action(
-            query=query_str,
+            query=query,
             folder=folder,
             action_type='add_flag',
             action_data={'flags': flags},
             message_count=len(results)
         )
-        click.echo(f"Queued action #{action_id}: ADD_FLAG {', '.join(flags)} to {len(results)} messages")
 
     if remove:
         flags = [normalize_flag(f) for f in remove]
         action_id = action_queue.queue_action(
-            query=query_str,
+            query=query,
             folder=folder,
             action_type='remove_flag',
             action_data={'flags': flags},
             message_count=len(results)
         )
-        click.echo(f"Queued action #{action_id}: REMOVE_FLAG {', '.join(flags)} from {len(results)} messages")
+
+    click.echo(f'Queued action #{action_id}: {action_queue.get_action(action_id).describe()}')
 
 
 @queue.command('flag')
@@ -360,28 +358,27 @@ def queue_label(account: int, folder: str, add: tuple, remove: tuple, query: tup
     cache = EmailCache(account, config.get('cache_days', 90))
     action_queue = ActionQueue(cache)
 
-    query_str = ' '.join(query)
-    results = cache.search(folder, query_str)
+    results = cache.search(folder, query)
 
     if add:
         action_id = action_queue.queue_action(
-            query=query_str,
+            query=query,
             folder=folder,
             action_type='add_label',
             action_data={'labels': list(add)},
             message_count=len(results)
         )
-        click.echo(f"Queued action #{action_id}: ADD_LABEL {', '.join(add)} to {len(results)} messages")
 
     if remove:
         action_id = action_queue.queue_action(
-            query=query_str,
+            query=query,
             folder=folder,
             action_type='remove_label',
             action_data={'labels': list(remove)},
             message_count=len(results)
         )
-        click.echo(f"Queued action #{action_id}: REMOVE_LABEL {', '.join(remove)} from {len(results)} messages")
+
+    click.echo(action_queue.get_action(action_id).describe())
 
 
 @queue.command('clear')
@@ -469,8 +466,8 @@ def apply(account: int, dry_run: bool, action_id: Optional[int]):
 
     if dry_run:
         click.echo("DRY RUN - No changes will be made\n")
-
-    click.confirm(f'This will run {len(actions)} actions. Are you sure you want to proceed?', abort=True)
+    else:
+        click.confirm(f'This will run {len(actions)} actions. Are you sure you want to proceed?', abort=True)
 
     # Connect to IMAP
     imap_host, imap_port, email_addr = config.get('imap_host'), config.get('imap_port'), config.get('email')
@@ -479,11 +476,11 @@ def apply(account: int, dry_run: bool, action_id: Optional[int]):
 
     affected_folders = set()
 
+    succeeded = 0
+    failed = 0
+    skipped = 0
     for action in actions:
         click.echo(f"[{action.id}] {action.describe()}")
-
-        if dry_run:
-            continue
 
         try:
             # Re-run query to get current UIDs
@@ -492,7 +489,18 @@ def apply(account: int, dry_run: bool, action_id: Optional[int]):
 
             if not uids:
                 click.echo(f"  ⚠️  No messages match query anymore, skipping")
-                action_queue.mark_applied(action.id)
+                skipped += action_queue.mark_applied(action.id)
+                continue
+
+            if len(uids) != action.message_count:
+                click.echo(f"  ⚠️  Number of messages matching query previously ({action.message_count}) differs from current ({len(uids)})")
+                if not click.confirm('Do you still want to proceed? '):
+                    skipped += action_queue.mark_applied(action.id)
+                    continue
+
+            if dry_run:
+                click.echo(f"  ✓ Dry run '{action.action_type}' on {len(uids)} messages in folder {action.folder}")
+                succeeded += 1
                 continue
 
             # Execute action
@@ -522,7 +530,7 @@ def apply(account: int, dry_run: bool, action_id: Optional[int]):
                 affected_folders.add(action.folder)
                 click.echo(f"  ✓ Removed labels from {len(uids)} messages")
 
-            action_queue.mark_applied(action.id)
+            succeeded += action_queue.mark_applied(action.id)
 
         except Exception as e:
             click.echo(f"  ✗ Failed: {e}", err=True)
@@ -537,7 +545,9 @@ def apply(account: int, dry_run: bool, action_id: Optional[int]):
                 click.echo(f"  ✗ Failed to sync {folder}: {e}", err=True)
 
     email_client.close()
-    click.echo("\nDone!")
+
+    click.echo()
+    click.echo(f'Done! Total actions: {len(actions)}, Skipped: {skipped}, Succeeded: {succeeded}, Failed: {failed}')
 
 
 if __name__ == '__main__':

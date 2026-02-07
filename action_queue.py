@@ -3,10 +3,9 @@ Action Queue System - Git-like staging for IMAP operations
 """
 
 import json
-import sqlite3
 from typing import List, Dict, Optional
 from dataclasses import dataclass
-from datetime import datetime
+import shlex
 
 
 @dataclass
@@ -57,12 +56,13 @@ class ActionQueue:
         self.conn = cache.conn
 
     def queue_action(self, query: str, folder: str, action_type: str, 
-                    action_data: dict, message_count: int) -> int:
+                     action_data: dict, message_count: int) -> int:
         """Add an action to the queue"""
+        query_str = shlex.join(query)
         cur = self.conn.execute(
             """INSERT INTO action_queue (query, folder, action_type, action_data, message_count)
                VALUES (?, ?, ?, ?, ?)""",
-            (query, folder, action_type, json.dumps(action_data), message_count)
+            (query_str, folder, action_type, json.dumps(action_data), message_count)
         )
         self.conn.commit()
         return cur.lastrowid
@@ -70,8 +70,8 @@ class ActionQueue:
     def get_pending_actions(self) -> List[QueuedAction]:
         """Get all pending actions"""
         cur = self.conn.execute(
-            """SELECT * FROM action_queue 
-               WHERE status = 'pending' 
+            """SELECT * FROM action_queue
+               WHERE status = 'pending'
                ORDER BY id ASC"""
         )
         return [QueuedAction.from_row(row) for row in cur.fetchall()]
@@ -87,27 +87,30 @@ class ActionQueue:
 
     def mark_applied(self, action_id: int):
         """Mark action as applied"""
-        self.conn.execute(
+        cur = self.conn.execute(
             "UPDATE action_queue SET status = 'applied' WHERE id = ?",
             (action_id,)
         )
         self.conn.commit()
+        return cur.rowcount
 
     def mark_failed(self, action_id: int):
         """Mark action as failed"""
-        self.conn.execute(
+        cur = self.conn.execute(
             "UPDATE action_queue SET status = 'failed' WHERE id = ?",
             (action_id,)
         )
         self.conn.commit()
+        return cur.rowcount
 
     def remove_action(self, action_id: int):
         """Remove action from queue"""
-        self.conn.execute(
+        cur = self.conn.execute(
             "DELETE FROM action_queue WHERE id = ?",
             (action_id,)
         )
         self.conn.commit()
+        return cur.rowcount
 
     def clear_pending(self):
         """Clear all pending actions"""
