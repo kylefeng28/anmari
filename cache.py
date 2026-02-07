@@ -46,6 +46,10 @@ class CachedFolderState(NamedTuple):
     highestmodseq: str
 
 
+def _require_folder(folder: Optional[str]):
+    if not folder:
+        raise 'folder required'
+
 # Database
 class EmailCache:
     def __init__(self, account: str, cache_days: int):
@@ -103,6 +107,7 @@ class EmailCache:
 
     def get_message(self, uid: int, folder: str) -> Optional[CachedMessage]:
         """Get cached message"""
+        _require_folder(folder)
         cur = self.conn.execute(
             "SELECT * FROM messages WHERE uid = ? AND folder = ?",
             (uid, folder)
@@ -112,8 +117,9 @@ class EmailCache:
 
     def insert_message(self, uid: int, folder: str, from_addr: str, from_name: Optional[str],
                       subject: str, date: int, flags: str | list[str]):
-        flags = normalize_flags_serialize(flags)
         """Insert or replace message"""
+        _require_folder(folder)
+        flags = normalize_flags_serialize(flags)
         self.conn.execute(
             """INSERT OR REPLACE INTO messages
                (uid, folder, from_addr, from_name, subject, date, body_preview, full_body, flags)
@@ -124,6 +130,7 @@ class EmailCache:
 
     def update_flags(self, uid: int, folder: str, flags: str | list[str]):
         """Update message flags"""
+        _require_folder(folder)
         flags = normalize_flags_serialize(flags)
         self.conn.execute(
             "UPDATE messages SET flags = ? WHERE uid = ? AND folder = ?",
@@ -133,6 +140,7 @@ class EmailCache:
 
     def delete_message(self, uid: int, folder: str):
         """Delete message"""
+        _require_folder(folder)
         self.conn.execute(
             "DELETE FROM messages WHERE uid = ? AND folder = ?",
             (uid, folder)
@@ -141,6 +149,7 @@ class EmailCache:
 
     def get_last_seen_uid(self, folder: str) -> Optional[int]:
         """Get highest UID in cache"""
+        _require_folder(folder)
         cur = self.conn.execute(
             "SELECT MAX(uid) FROM messages WHERE folder = ?",
             (folder,)
@@ -150,13 +159,15 @@ class EmailCache:
 
     def get_all_uids(self, folder: str) -> List[int]:
         """Get all cached UIDs"""
+        _require_folder(folder)
         cur = self.conn.execute(
             "SELECT uid FROM messages WHERE folder = ? ORDER BY uid",
             (folder,)
         )
         return [row[0] for row in cur.fetchall()]
 
-    def search(self, folder: str, query: str | list[str]) -> List[CachedMessage]:
+    def search(self, folder: Optional[str], query: str | list[str]) -> List[CachedMessage]:
+        """Search messages using a notmuch-style query"""
         conditions, params, has_tag_filter = parse_search_query(query)
 
         # If query includes tag filter, join with tags table
@@ -179,6 +190,7 @@ class EmailCache:
 
     def get_folder_state(self, folder: str) -> Optional[tuple[int, int]]:
         """Get cached UIDVALIDITY and HIGHESTMODSEQ for folder"""
+        _require_folder(folder)
         cur = self.conn.execute(
             "SELECT uidvalidity, highestmodseq FROM folder_state WHERE folder = ?",
             (folder,)
@@ -188,6 +200,7 @@ class EmailCache:
 
     def set_folder_state(self, folder: str, uidvalidity: int, highestmodseq: int):
         """Cache UIDVALIDITY and HIGHESTMODSEQ for folder"""
+        _require_folder(folder)
         self.conn.execute(
             """INSERT OR REPLACE INTO folder_state (folder, uidvalidity, highestmodseq)
                VALUES (?, ?, ?)""",
@@ -195,24 +208,29 @@ class EmailCache:
         )
         self.conn.commit()
 
-    def clear_folder_state(self, folder: str):
-        """Clear UIDVALIDITY and HIGHESTMODSEQ state for folder (used when UIDVALIDITY changes)"""
-        if folder:
-            print(f'Clearing folder state for {folder}')
-            self.conn.execute("DELETE FROM folder_state WHERE folder = ?", (folder,))
-        else:
-            print('Clearing all folder states')
-            self.conn.execute("DELETE FROM folder_state")
+    def clear_folders_state_for_cache_cleanup(self, folders: list[str]):
+        """Clear UIDVALIDITY and HIGHESTMODSEQ state for folders (used when cache is cleared)
+        """
+        _require_folder(folders)
+
+        print(f'Clearing folder states for {folders}')
+
+        placeholders = ', '.join((['?']) * len(folders))
+        print(f"DELETE FROM folder_state WHERE folder IN {placeholders}", folders)
+        self.conn.execute(f"DELETE FROM folder_state WHERE folder IN ({placeholders})", folders)
         self.conn.commit()
 
-    def clear_folder_messages(self, folder: str):
-        """Clear all messages for folder (used when UIDVALIDITY changes)"""
+    def clear_folder_messages_for_uidvalidity_change(self, folder: str):
+        """Clear UIDVALIDITY and HIGHESTMODSEQ and all messages for folder (used when UIDVALIDITY changes)"""
+        _require_folder(folder)
+        self.conn.execute("DELETE FROM folder_state WHERE folder = ?", (folder,))
         self.conn.execute("DELETE FROM messages WHERE folder = ?", (folder,))
         self.conn.commit()
 
     # Tag operations
     def add_tag(self, uid: int, folder: str, tag: str):
         """Add a tag to a message"""
+        _require_folder(folder)
         self.conn.execute(
             "INSERT OR IGNORE INTO tags (uid, folder, tag) VALUES (?, ?, ?)",
             (uid, folder, tag)
@@ -221,6 +239,7 @@ class EmailCache:
 
     def remove_tag(self, uid: int, folder: str, tag: str):
         """Remove a tag from a message"""
+        _require_folder(folder)
         self.conn.execute(
             "DELETE FROM tags WHERE uid = ? AND folder = ? AND tag = ?",
             (uid, folder, tag)
@@ -229,6 +248,7 @@ class EmailCache:
 
     def get_tags(self, uid: int, folder: str) -> list[str]:
         """Get all tags for a message"""
+        _require_folder(folder)
         cur = self.conn.execute(
             "SELECT tag FROM tags WHERE uid = ? AND folder = ? ORDER BY tag",
             (uid, folder)
@@ -259,6 +279,7 @@ class EmailCache:
     # Gmail label operations
     def set_gm_labels(self, uid: int, folder: str, labels: list[str]):
         """Set Gmail labels for a message (replaces existing labels)"""
+        _require_folder(folder)
         # Clear existing labels
         self.conn.execute(
             "DELETE FROM gm_labels WHERE uid = ? AND folder = ?",
@@ -274,18 +295,21 @@ class EmailCache:
 
     def get_gm_labels(self, uid: int, folder: str) -> list[str]:
         """Get all Gmail labels for a message"""
+        _require_folder(folder)
         cur = self.conn.execute(
             "SELECT label FROM gm_labels WHERE uid = ? AND folder = ? ORDER BY label",
             (uid, folder)
         )
         return [row[0] for row in cur.fetchall()]
 
-    def cleanup_old_messages(self, direction: str, days: int, folder=None, interactive=False) -> int:
+    def cleanup_old_messages(self, direction: str, days: int, folder: str, all_folders: bool, interactive=False) -> int:
         """Delete messages newer/older than days
 
         Returns:
             Number of messages deleted
         """
+        if not all_folders:
+            _require_folder(folder)
 
         # Calculate cutoff date
         cutoff = datetime.now() - timedelta(days=days)
@@ -298,28 +322,50 @@ class EmailCache:
             op = '>'
         else:
             raise 'unknown direction'
-        folder_cond = 'AND folder = ?' if folder else ''
-        params = (folder, cutoff_str,) if folder else (cutoff_str,)
 
         # Count messages to delete
-        cur = self.conn.execute(
-            f"SELECT COUNT(*) FROM messages WHERE date {op} ? {folder_cond}",
-            params
-        )
-        count = cur.fetchone()[0]
+        folders_to_modify = []
+        if all_folders:
+            # All folders
+            cur = self.conn.execute(
+                f"SELECT COUNT(*), folder FROM messages WHERE date {op} ? GROUP BY folder",
+                (cutoff_str,))
+            count_by_folders = {}
+            count = 0
+            for row in cur.fetchall():
+                f_c, f = row[0], row[1]
+                count_by_folders[f] = f_c
+                count += f_c
+                folders_to_modify.append(f)
+            print(f'[debug] {count_by_folders}')
+            confirm_msg = f'Really delete {count} messages across {len(folders_to_modify)} folders? '
+        else:
+            # Specific folder
+            cur = self.conn.execute(
+                f"SELECT COUNT(*) FROM messages WHERE date {op} ? AND folder = ?",
+                (cutoff_str, folder,))
+            count = cur.fetchone()[0]
+            confirm_msg = f'Really delete {count} messages? '
+            folders_to_modify = [folder]
 
         if count > 0:
             if interactive:
-                click.confirm(f'Really delete {count} messages? ', abort=True)
+                click.confirm(confirm_msg, abort=True)
 
-            # Clear folder state (UIDVALIDITY and HIGHESTMODSEQ)
-            self.clear_folder_state(folder)
+            # Clear folder HIGHESTMODSEQ  state
+            self.clear_folders_state_for_cache_cleanup(folders_to_modify)
 
             # Delete old messages (CASCADE will delete tags and gm_labels)
-            self.conn.execute(
-                f"DELETE FROM messages WHERE date {op} ? {folder_cond}",
-                params
-            )
+            if all_folders:
+                self.conn.execute(
+                    f"DELETE FROM messages WHERE date {op} ?",
+                    (cutoff_str,)
+                )
+            else:
+                self.conn.execute(
+                    f"DELETE FROM messages WHERE date {op} ? AND folder = ?",
+                    (cutoff_str, folder,)
+                )
             self.conn.commit()
 
         return count

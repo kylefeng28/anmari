@@ -35,10 +35,12 @@ def cache():
 @click.option('--account', '-a', default=0, help='Account index')
 @click.option('--days-older', type=int, help='Clear cache older than this many days')
 @click.option('--days-newer', type=int, help='Clear cache newer than this many days')
-@click.option('--folder', '-f', default=None, help='Folder to clean up (optional, default all)')
-def clear(account: int, days_older: int, days_newer: int, folder: str):
-    """Delete messages older/newer than specified days"""
-    config = AccountConfig(account)
+@click.option('--folder', '-f', help="Folder to clean up")
+@click.option('--all-folders', is_flag=True, help='Sync all folders')
+def clear(account: int, days_older: int, days_newer: int, folder: str, all_folders: bool):
+    """
+    Delete cache older/newer than the specified number of days.
+    """
 
     if (days_newer and days_older) or (not days_newer and not days_older):
         raise click.UsageError("Must specify one of --days-older or --days-newer")
@@ -47,8 +49,9 @@ def clear(account: int, days_older: int, days_newer: int, folder: str):
     days = days_older or days_newer
 
     # Initialize cache and email client
+    config = AccountConfig(account)
     cache = EmailCache(account, config.get('cache_days', DEFAULT_CACHE_DAYS))
-    count = cache.cleanup_old_messages(direction, days, folder, interactive=True)
+    count = cache.cleanup_old_messages(direction, days, folder, all_folders, interactive=True)
 
     if count > 0:
         click.echo(f"Deleted {count} messages {direction} than {days} days")
@@ -63,9 +66,9 @@ def clear(account: int, days_older: int, days_newer: int, folder: str):
 @click.option('--all-folders', is_flag=True, help='Sync all folders')
 def sync(account: int, folder: str, page_size: int, all_folders: bool):
     """Sync emails from IMAP to local cache"""
-    config = AccountConfig(account)
 
     # Initialize cache and email client
+    config = AccountConfig(account)
     cache = EmailCache(account, config.get('cache_days', DEFAULT_CACHE_DAYS))
     imap_host, imap_port, email_addr = config.get('imap_host'), config.get('imap_port'), config.get('email')
     password = config.get_password()
@@ -100,9 +103,8 @@ def sync(account: int, folder: str, page_size: int, all_folders: bool):
 @click.argument('query', nargs=-1, required=True)
 def search(account: int, folder: str, limit: int, all: bool, query: tuple):
     """Search emails in local cache"""
-    config = AccountConfig(account)
-
     # Initialize cache
+    config = AccountConfig(account)
     cache = EmailCache(account, config.get('cache_days', 90))
 
     # Search

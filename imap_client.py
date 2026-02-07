@@ -155,10 +155,11 @@ class EmailImapClient:
 
             if cached_uidvalidity != uidvalidity:
                 print('⚠️  UIDVALIDITY changed! Clearing local cache and starting fresh.')
-                self.cache.clear_folder(folder)
+                self.cache.clear_folder_messages_for_uidvalidity_change(folder)
                 cached_state = None
                 cached_highestmodseq = 0
         else:
+            print(f'No cached HIGHESTMODSEQ found')
             cached_highestmodseq = 0
 
         last_seen_uid = self.cache.get_last_seen_uid(folder)

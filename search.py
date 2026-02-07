@@ -82,7 +82,7 @@ def parse_search_query(query: str | list[str]) -> tuple[str, list, bool]:
                 conditions.append(next_token_upper)
                 i += 2
                 continue
-        
+
         i += 1
         # Implicit AND between terms
         if i < len(tokens) and tokens[i].upper() not in ('AND', 'OR', 'NOT'):
