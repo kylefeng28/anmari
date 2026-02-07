@@ -195,10 +195,19 @@ class EmailCache:
         )
         self.conn.commit()
 
-    def clear_folder(self, folder: str):
-        """Clear all messages and state for folder (used when UIDVALIDITY changes)"""
+    def clear_folder_state(self, folder: str):
+        """Clear UIDVALIDITY and HIGHESTMODSEQ state for folder (used when UIDVALIDITY changes)"""
+        if folder:
+            print(f'Clearing folder state for {folder}')
+            self.conn.execute("DELETE FROM folder_state WHERE folder = ?", (folder,))
+        else:
+            print('Clearing all folder states')
+            self.conn.execute("DELETE FROM folder_state")
+        self.conn.commit()
+
+    def clear_folder_messages(self, folder: str):
+        """Clear all messages for folder (used when UIDVALIDITY changes)"""
         self.conn.execute("DELETE FROM messages WHERE folder = ?", (folder,))
-        self.conn.execute("DELETE FROM folder_state WHERE folder = ?", (folder,))
         self.conn.commit()
 
     # Tag operations
@@ -302,6 +311,9 @@ class EmailCache:
         if count > 0:
             if interactive:
                 click.confirm(f'Really delete {count} messages? ', abort=True)
+
+            # Clear folder state (UIDVALIDITY and HIGHESTMODSEQ)
+            self.clear_folder_state(folder)
 
             # Delete old messages (CASCADE will delete tags and gm_labels)
             self.conn.execute(
