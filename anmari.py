@@ -13,7 +13,7 @@ from config import AccountConfig
 from cache import EmailCache
 from imap_client import EmailImapClient
 from action_queue import ActionQueue, QueuedAction
-from repl import repl as anmari_repl
+from repl import repl as anmari_repl, PipeContext
 from utils import decode_if_bytes
 
 
@@ -21,6 +21,9 @@ DEFAULT_FOLDER = 'INBOX'
 DEFAULT_CACHE_DAYS = 90
 
 SEEN = '\\Seen'
+
+
+pass_pipe_ctx = click.make_pass_decorator(PipeContext, ensure=True)
 
 
 # Commands
@@ -98,11 +101,14 @@ def sync(account: int, folder: str, page_size: int, all_folders: bool):
 @click.option('--limit', '-l', type=int, default=20, help='Limit results')
 @click.option('--all', is_flag=True, help='Show all results')
 @click.argument('query', nargs=-1, required=True)
-def search(account: int, folder: str, limit: int, all: bool, query: tuple):
+@pass_pipe_ctx
+def search(pipe_ctx: PipeContext, account: int, folder: str, limit: int, all: bool, query: tuple):
     """Search emails in local cache"""
     from rich.console import Console
     from rich.table import Table
     from datetime import datetime
+
+    pipe_ctx.query = query
 
     # Initialize cache
     config = AccountConfig(account)
@@ -249,7 +255,6 @@ def folders(account: int):
 
     email_client.close()
 
-
 # Action Queue Commands
 @cli.group()
 def queue():
@@ -332,7 +337,8 @@ def queue_flag(account: int, folder: str, add: tuple, remove: tuple, query: tupl
 @click.option('--account', '-a', default=0, help='Account index')
 @click.option('--folder', '-f', default=DEFAULT_FOLDER, help='Folder')
 @click.argument('query', nargs=-1, required=True)
-def markread(account: int, folder: str, query: tuple):
+@pass_pipe_ctx
+def queue_markread(ctx, account: int, folder: str, query: tuple):
     """Alias for: queue flag --add \\Seen"""
     _queue_flag(account, folder, [SEEN], [], query)
 
@@ -341,7 +347,7 @@ def markread(account: int, folder: str, query: tuple):
 @click.option('--account', '-a', default=0, help='Account index')
 @click.option('--folder', '-f', default=DEFAULT_FOLDER, help='Folder')
 @click.argument('query', nargs=-1, required=True)
-def markunread(account: int, folder: str, query: tuple):
+def queue_markunread(account: int, folder: str, query: tuple):
     """Alias for: queue flag --remove \\Seen"""
     _queue_flag(account, folder, [], [SEEN], query)
 
@@ -476,9 +482,8 @@ def apply(account: int, dry_run: bool, action_id: Optional[int]):
 
     affected_folders = set()
 
-    succeeded = 0
-    failed = 0
-    skipped = 0
+    succeeded, failed, skipped = 0, 0, 0
+    modified = 0
     for action in actions:
         click.echo(f"[{action.id}] {action.describe()}")
 
@@ -531,9 +536,12 @@ def apply(account: int, dry_run: bool, action_id: Optional[int]):
                 click.echo(f"  ✓ Removed labels from {len(uids)} messages")
 
             succeeded += action_queue.mark_applied(action.id)
+            modified += len(uids)
 
         except Exception as e:
             click.echo(f"  ✗ Failed: {e}", err=True)
+            import traceback
+            traceback.print_exc()
             action_queue.mark_failed(action.id)
 
     if not dry_run and affected_folders:
@@ -548,6 +556,7 @@ def apply(account: int, dry_run: bool, action_id: Optional[int]):
 
     click.echo()
     click.echo(f'Done! Total actions: {len(actions)}, Skipped: {skipped}, Succeeded: {succeeded}, Failed: {failed}')
+    click.echo(f'Total messages modified: {modified}')
 
 
 if __name__ == '__main__':
