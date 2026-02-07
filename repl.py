@@ -5,17 +5,36 @@ Interactive REPL for anmari email client
 
 import shlex
 import click
+from prompt_toolkit import PromptSession
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+from prompt_toolkit.completion import WordCompleter
+from pathlib import Path
 
 
 def repl(cli):
-    """Start interactive REPL mode"""
+    """Start interactive REPL mode with prompt_toolkit"""
+
+    # Setup history file
+    history_file = Path.home() / '.anmari_history'
+    session = PromptSession(
+        history=FileHistory(str(history_file)),
+        auto_suggest=AutoSuggestFromHistory(),
+        completer=WordCompleter([
+            'sync', 'search', 'tag', 'folders', 'cleanup',
+            'queue', 'status', 'apply', 'help', 'exit', 'quit',
+            '--account', '--folder', '--limit', '--all',
+            '--dry-run', '--to', '--add', '--remove'
+        ], ignore_case=True)
+    )
+
     print("anmari interactive mode")
     print("Type 'help' for commands, 'exit' or Ctrl+D to quit\n")
 
     while True:
         try:
-            # Read command
-            line = input("anmari> ").strip()
+            # Read command with prompt_toolkit
+            line = session.prompt("anmari> ").strip()
 
             if not line:
                 continue
