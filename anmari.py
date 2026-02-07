@@ -13,6 +13,7 @@ from config import AccountConfig
 from cache import EmailCache
 from imap_client import EmailImapClient
 from repl import repl as anmari_repl
+from utils import decode_if_bytes
 
 
 DEFAULT_FOLDER = 'INBOX'
@@ -59,7 +60,8 @@ def clear(account: int, days_older: int, days_newer: int, folder: str):
 @click.option('--account', '-a', default=0, help='Account index')
 @click.option('--folder', '-f', default=DEFAULT_FOLDER, help='Folder to sync')
 @click.option('--page-size', type=int, default=100, help='Page size for fetching')
-def sync(account: int, folder: str, page_size: int):
+@click.option('--all-folders', is_flag=True, help='Sync all folders')
+def sync(account: int, folder: str, page_size: int, all_folders: bool):
     """Sync emails from IMAP to local cache"""
     config = AccountConfig(account)
 
@@ -69,7 +71,25 @@ def sync(account: int, folder: str, page_size: int):
     password = config.get_password()
     email_client = EmailImapClient(imap_host, imap_port, email_addr, password, cache)
 
-    email_client.sync_from_server(folder, page_size)
+    if all_folders:
+        # Get list of all folders
+        folders = email_client.list_folders()
+        folder_names = [name for flags, delimiter, name in folders]
+
+        click.echo(f"Syncing {len(folder_names)} folders...")
+        for folder_name in folder_names:
+            click.echo(f"\n{'='*60}")
+            click.echo(f"Syncing folder: {folder_name}")
+            click.echo('='*60)
+            try:
+                email_client.sync_from_server(folder_name, page_size)
+            except Exception as e:
+                click.echo(f"Error syncing {folder_name}: {e}", err=True)
+                continue
+    else:
+        email_client.sync_from_server(folder, page_size)
+
+    email_client.close()
 
 
 @cli.command()
@@ -162,6 +182,32 @@ def tag(account: int, folder: str, tags_and_query: tuple):
 
     # TODO display number of messages that had their tags actually changed
     click.echo(f"Tagged {count} messages with {tags_str}")
+
+
+@cli.command()
+@click.option('--account', '-a', default=0, help='Account index')
+def folders(account: int):
+    """List all folders/mailboxes"""
+    config = AccountConfig(account)
+
+    # Initialize email client
+    imap_host, imap_port, email_addr = config.get('imap_host'), config.get('imap_port'), config.get('email')
+    password = config.get_password()
+    cache = EmailCache(account, config.get('cache_days', 90))
+    email_client = EmailImapClient(imap_host, imap_port, email_addr, password, cache)
+
+    folders_list = email_client.list_folders()
+
+    click.echo(f"Folders for {email_addr}:")
+    for flags, delimiter, name in folders_list:
+        flag_str = ', '.join([decode_if_bytes(f) for f in flags])
+        click.echo(f"  {name}")
+        if flag_str:
+            click.echo(f"    Flags: {flag_str}")
+
+    click.echo(f"\nTotal: {len(folders_list)} folders")
+
+    email_client.close()
 
 
 if __name__ == '__main__':

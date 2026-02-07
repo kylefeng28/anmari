@@ -103,6 +103,15 @@ class EmailImapClient:
     def close(self):
         self.client.logout()
 
+    def list_folders(self):
+        """List all folders/mailboxes
+
+        Returns:
+            List of (flags, delimiter, name) tuples
+        """
+        folders = self.client.list_folders()
+        return folders
+
     def select_folder(self, folder):
         """Select folder and return (uidvalidity, highestmodseq)"""
         response = self.client.select_folder(folder, readonly=True)
