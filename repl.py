@@ -133,6 +133,10 @@ def repl(cli):
                     print(f"Error parsing command: {e}")
                     break
 
+                # Support aliases (e.g. markread -> queue markread)
+                if argv[0] in ('archive', 'markread', 'markunread', 'label', 'move', 'status'):
+                    argv = ['queue'] + argv
+
                 # Inject pipe context for non-first commands
                 try:
                     if not is_first and pipe_ctx.has_query():

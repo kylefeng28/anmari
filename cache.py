@@ -1,13 +1,24 @@
+import os
 import click
 import sqlite3
 from typing import NamedTuple, Optional
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from search import parse_search_query
 from utils import decode_if_bytes, format_datetime_sqlite
 
-def get_db_path(account):
-    return f"anmari_{account}.db"
+
+def get_db_dir() -> Path:
+    """Get database directory path"""
+    return Path.home() / ".local/state/anmari"
+
+
+def get_db_path(account: str) -> Path:
+    """Get database file path"""
+    db_dir = get_db_dir()
+    db_dir.mkdir(exist_ok=True)
+    return db_dir / f"anmari_{account}.db"
 
 
 def normalize_flags_serialize(flags: str | list[str]) -> str:
