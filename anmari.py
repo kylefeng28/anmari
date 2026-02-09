@@ -12,6 +12,7 @@ from email.utils import formataddr
 from config import AccountConfig
 from cache import EmailCache
 from imap_client import EmailImapClient
+from graph_client import EmailGraphClient
 from action_queue import ActionQueue, QueuedAction
 from sync_manager import SyncManager
 from repl import repl as anmari_repl, PipeContext
@@ -39,6 +40,39 @@ def cli():
 def cache():
     pass
 
+def init_config(account):
+    return AccountConfig(account)
+
+
+def init_cache(account, config):
+    # Initialize cache and email client
+    cache = EmailCache(account, config.get('cache_days', DEFAULT_CACHE_DAYS))
+    return cache
+
+
+def init_email_client(account, config, cache):
+    # Initialize cache and email client
+    if not cache:
+        cache = init_cache(account, config)
+
+    provider = config.get('provider')
+    if provider == 'imap':
+        password = config.get_password()
+        return EmailImapClient(
+            host=config.get('imap_host'),
+            port=config.get('imap_port'),
+            email_addr=config.get('email'),
+            password=config.get_password(),
+            cache=cache)
+
+    elif provider == 'microsoft365':
+        return EmailGraphClient(
+            client_id=config.get('client_id'),
+            tenant_id=config.get('tenant_id', 'common'),
+            email_addr=config.get('email'),
+            cache=cache)
+
+    raise click.UsageError('unknown provider ' + provider)
 
 @cache.command()
 @click.option('--account', '-a', default=0, help='Account index')
@@ -50,9 +84,9 @@ def clear(account: int, days: int, folder: str, all_folders: bool):
     Clean up the most recent messages from cache
     """
 
-    # Initialize cache and email client
-    config = AccountConfig(account)
-    cache = EmailCache(account, config.get('cache_days', DEFAULT_CACHE_DAYS))
+    # Initialize cache
+    config = init_config(account)
+    cache = init_cache(account, config)
     count = cache.cleanup_recent(days, folder, all_folders, interactive=True)
 
     if count > 0:
@@ -70,12 +104,9 @@ def clear(account: int, days: int, folder: str, all_folders: bool):
 def sync(account: int, folder: str, page_size: int, all_folders: bool, workers: int):
     """Sync emails from IMAP to local cache"""
 
-    # Initialize cache and email client
-    config = AccountConfig(account)
-    cache = EmailCache(account, config.get('cache_days', DEFAULT_CACHE_DAYS))
-    imap_host, imap_port, email_addr = config.get('imap_host'), config.get('imap_port'), config.get('email')
-    password = config.get_password()
-    email_client = EmailImapClient(imap_host, imap_port, email_addr, password, cache)
+    # Initialize email client
+    config = init_config(account)
+    email_client = init_email_client(account, config)
 
     if all_folders:
         # Get list of all folders
@@ -112,8 +143,8 @@ def search(pipe_ctx: PipeContext, account: int, folder: str, limit: int, all: bo
     pipe_ctx.query = query
 
     # Initialize cache
-    config = AccountConfig(account)
-    cache = EmailCache(account, config.get('cache_days', 90))
+    config = init_config(account)
+    cache = init_cache(account, config)
 
     # Search
     results = cache.search(folder, query)
@@ -195,8 +226,10 @@ def tag(account: int, folder: str, tags_and_query: tuple):
 
     Note: Use -- before query if it starts with - to prevent option parsing.
     """
-    config = AccountConfig(account)
-    cache = EmailCache(account, config.get('cache_days', 90))
+
+    # Initialize cache
+    config = init_config(account)
+    cache = init_cache(account, config)
 
     # Parse tags and query
     tags_to_add = []
@@ -236,17 +269,13 @@ def tag(account: int, folder: str, tags_and_query: tuple):
 @click.option('--account', '-a', default=0, help='Account index')
 def folders(account: int):
     """List all folders/mailboxes"""
-    config = AccountConfig(account)
-
     # Initialize email client
-    imap_host, imap_port, email_addr = config.get('imap_host'), config.get('imap_port'), config.get('email')
-    password = config.get_password()
-    cache = EmailCache(account, config.get('cache_days', 90))
-    email_client = EmailImapClient(imap_host, imap_port, email_addr, password, cache)
+    config = init_config(account)
+    email_client = init_email_client(account, config, cache=None)
 
     folders_list = email_client.list_folders()
 
-    click.echo(f"Folders for {email_addr}:")
+    click.echo(f"Folders for {config.get('email')}:")
     for flags, delimiter, name in folders_list:
         flag_str = ', '.join([decode_if_bytes(f) for f in flags])
         click.echo(f"  {name}")
@@ -265,9 +294,8 @@ def queue():
 
 
 def _queue_move(account: int, folder: str, to: str, query: tuple):
-    config = AccountConfig(account)
-    cache = EmailCache(account, config.get('cache_days', 90))
-    action_queue = ActionQueue(cache)
+    config = init_config(account)
+    cache = init_cache(account, config)
 
     # Search to get message count
     results = cache.search(folder, query)
@@ -303,9 +331,8 @@ def queue_archive(account: int, folder: str, query: tuple):
 
 
 def _queue_flag(account: int, folder: str, add: tuple, remove: tuple, query: tuple):
-    config = AccountConfig(account)
-    cache = EmailCache(account, config.get('cache_days', 90))
-    action_queue = ActionQueue(cache)
+    config = init_config(account)
+    cache = init_cache(account, config)
 
     results = cache.search(folder, query)
 
@@ -374,8 +401,8 @@ def queue_markunread(account: int, folder: str, query: tuple):
 @click.argument('query', nargs=-1, required=True)
 def queue_label(account: int, folder: str, add: tuple, remove: tuple, query: tuple):
     """Queue Gmail label operation"""
-    config = AccountConfig(account)
-    cache = EmailCache(account, config.get('cache_days', 90))
+    config = init_config(account)
+    cache = init_cache(account, config)
     action_queue = ActionQueue(cache)
 
     results = cache.search(folder, query)
@@ -405,8 +432,8 @@ def queue_label(account: int, folder: str, add: tuple, remove: tuple, query: tup
 @click.option('--account', '-a', default=0, help='Account index')
 def queue_clear(account: int):
     """Clear all pending actions"""
-    config = AccountConfig(account)
-    cache = EmailCache(account, config.get('cache_days', 90))
+    config = init_config(account)
+    cache = init_cache(account, config)
     action_queue = ActionQueue(cache)
 
     action_queue.clear_pending()
@@ -418,8 +445,8 @@ def queue_clear(account: int):
 @click.option('--count', '-n', default=1, help='Number of actions to undo')
 def queue_undo(account: int, count: int):
     """Undo last N pending actions"""
-    config = AccountConfig(account)
-    cache = EmailCache(account, config.get('cache_days', 90))
+    config = init_config(account)
+    cache = init_cache(account, config)
     action_queue = ActionQueue(cache)
 
     removed = action_queue.undo_last(count)
@@ -433,8 +460,8 @@ def queue_status(account: int):
     from rich.console import Console
     from rich.table import Table
 
-    config = AccountConfig(account)
-    cache = EmailCache(account, config.get('cache_days', 90))
+    config = init_config(account)
+    cache = init_cache(account, config)
     action_queue = ActionQueue(cache)
 
     actions = action_queue.get_pending_actions()
@@ -466,8 +493,8 @@ def queue_status(account: int):
 @click.option('--id', 'action_id', type=int, help='Apply specific action by ID')
 def apply(account: int, dry_run: bool, action_id: Optional[int]):
     """Apply pending actions to IMAP server"""
-    config = AccountConfig(account)
-    cache = EmailCache(account, config.get('cache_days', 90))
+    config = init_config(account)
+    cache = init_cache(account, config)
     action_queue = ActionQueue(cache)
 
     # Get actions to apply
@@ -490,9 +517,9 @@ def apply(account: int, dry_run: bool, action_id: Optional[int]):
         click.confirm(f'This will run {len(actions)} actions. Are you sure you want to proceed?', abort=True)
 
     # Connect to IMAP
-    imap_host, imap_port, email_addr = config.get('imap_host'), config.get('imap_port'), config.get('email')
-    password = config.get_password()
-    email_client = EmailImapClient(imap_host, imap_port, email_addr, password, cache)
+    if config.get('provider') != 'imap':
+        raise click.UsageError('Can only handle IMAP!')
+    email_client = init_email_client(account, config, cache)
 
     affected_folders = set()
 

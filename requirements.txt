@@ -3,3 +3,8 @@ dateparser==1.3.0
 IMAPClient==3.1.0
 rich==14.3.2
 prompt_toolkit==3.0.52
+
+# Microsoft 365 / Graph API support
+msgraph-sdk>=1.0.0
+azure-identity>=1.12.0
+requests>=2.31.0

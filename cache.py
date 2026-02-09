@@ -126,6 +126,12 @@ class EmailCache:
                 status TEXT DEFAULT 'pending'
             );
             CREATE INDEX IF NOT EXISTS idx_action_queue_status ON action_queue(status);
+
+            CREATE TABLE IF NOT EXISTS delta_links (
+                folder TEXT PRIMARY KEY,
+                delta_link TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
         """)
         self.conn.commit()
 
@@ -381,3 +387,24 @@ class EmailCache:
             self.conn.commit()
 
         return count
+
+    # Microsoft Graph delta link operations
+    def get_delta_link(self, folder: str) -> Optional[str]:
+        """Get delta link for incremental sync"""
+        _require_folder(folder)
+        cur = self.conn.execute(
+            "SELECT delta_link FROM delta_links WHERE folder = ?",
+            (folder,)
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+
+    def set_delta_link(self, folder: str, delta_link: str):
+        """Save delta link for next incremental sync"""
+        _require_folder(folder)
+        self.conn.execute(
+            """INSERT OR REPLACE INTO delta_links (folder, delta_link, updated_at)
+               VALUES (?, ?, CURRENT_TIMESTAMP)""",
+            (folder, delta_link)
+        )
+        self.conn.commit()
