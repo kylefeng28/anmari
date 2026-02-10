@@ -202,18 +202,42 @@ class IMAPGraphProxy:
         response += ok(tag, "[READ-WRITE] SELECT completed")
         return response
 
+    def parse_uids_range(self, uids_str):
+        # Parse range if provided: 1:* or A:* or A:B
+        if ":" in uids_str:
+            all_uids = sorted(self.msg_map.keys())
+            range_str = uids_str
+            start, end = range_str.split(":")
+            start_uid = int(start)
+
+            if start_uid == 1 and end == "*":
+                uids = all_uids
+            elif end == "*":
+                uids = [uid for uid in all_uids if uid >= start_uid]
+            else:
+                end_uid = int(end)
+                uids = [uid for uid in all_uids if start_uid <= uid <= end_uid]
+
+        else:
+            uids = uids_str.split(' ')
+
+        return uids
+
+    async def handle_search(self, tag, args):
+        # SEARCH UID 1:* or SEARCH ALL
+        uids = parse_uids_range(args)
+
+        uid_list = " ".join(str(uid) for uid in uids)
+        response = untagged(f"SEARCH {uid_list}")
+        response += ok(tag, "SEARCH completed")
+        return response
+
     async def handle_fetch(self, tag, args):
         # Parse: FETCH 1:* (FLAGS UID) or FETCH 1 (BODY[])
-        seq_set = args[0]
+        uids = parse_uids_range(args[0])
         items = " ".join(args[1:]).strip("()").upper()
 
         response = ""
-
-        # Simple range parsing (1:* means all)
-        if seq_set == "1:*":
-            uids = list(self.msg_map.keys())
-        else:
-            uids = [int(seq_set)]
 
         for uid in uids:
             if uid not in self.msg_map:
@@ -345,6 +369,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 response = await proxy.handle_list(tag, args)
             elif command == "SELECT":
                 response = await proxy.handle_select(tag, args)
+            elif command == "SEARCH":
+                response = await proxy.handle_search(tag, args)
             elif command == "FETCH":
                 response = await proxy.handle_fetch(tag, args)
             elif command == "STORE":
