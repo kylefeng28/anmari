@@ -8,8 +8,8 @@ import asyncio
 import time
 from peewee import *
 from msgraph import GraphServiceClient
-from azure.identity import DeviceCodeCredential
 from kiota_abstractions.base_request_configuration import RequestConfiguration
+from auth_credential import AuthCodeCredential
 
 
 # Database setup
@@ -328,11 +328,22 @@ class IMAPGraphProxy:
 
 
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, cache: UIDCache):
-    # Initialize Graph client
-    credential = DeviceCodeCredential(
+    # Initialize Graph client with custom credential
+    # Option 1: Provide auth_code directly
+    # credential = AuthCodeCredential(
+    #     client_id="YOUR_CLIENT_ID",
+    #     tenant_id="YOUR_TENANT_ID",
+    #     redirect_uri="http://localhost:8080",
+    #     auth_code="YOUR_AUTH_CODE_HERE"
+    # )
+    
+    # Option 2: Use cached token (after first auth)
+    credential = AuthCodeCredential(
         client_id="YOUR_CLIENT_ID",
-        tenant_id="common"
+        tenant_id="YOUR_TENANT_ID",
+        redirect_uri="http://localhost:8080"
     )
+    
     scopes = ["https://graph.microsoft.com/.default"]
     client = GraphServiceClient(credential, scopes)
 
