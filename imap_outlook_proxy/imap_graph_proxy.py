@@ -276,6 +276,27 @@ class IMAPGraphProxy:
 
         return ok(tag, "STORE completed")
 
+    async def handle_move(self, tag, args):
+        # MOVE uid destination_folder
+        uid = int(args[0])
+        dest_folder = args[1].strip('"')
+
+        if uid not in self.msg_map:
+            return no(tag, "Message not found")
+
+        if dest_folder not in self.folder_map:
+            return no(tag, "Destination folder not found")
+
+        msg_id = self.msg_map[uid]
+        dest_folder_id = self.folder_map[dest_folder]
+
+        # Move message via Graph API
+        await self.client.me.messages.by_message_id(msg_id).move.post(
+            {"destinationId": dest_folder_id}
+        )
+
+        return ok(tag, "MOVE completed")
+
     async def handle_logout(self, tag):
         response = untagged("BYE IMAP4rev1 Server logging out")
         response += ok(tag, "LOGOUT completed")
@@ -328,6 +349,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 response = await proxy.handle_fetch(tag, args)
             elif command == "STORE":
                 response = await proxy.handle_store(tag, args)
+            elif command == "MOVE":
+                response = await proxy.handle_move(tag, args)
             elif command == "LOGOUT":
                 response = await proxy.handle_logout(tag)
                 writer.write(response.encode())
