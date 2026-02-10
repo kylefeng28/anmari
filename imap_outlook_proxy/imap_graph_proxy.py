@@ -5,12 +5,92 @@ Usage: python imap_graph_proxy.py
 """
 
 import asyncio
-import sqlite3
 import time
-from email.parser import BytesParser
+from peewee import *
 from msgraph import GraphServiceClient
 from azure.identity import DeviceCodeCredential
 from kiota_abstractions.base_request_configuration import RequestConfiguration
+
+
+# Database setup
+db = SqliteDatabase('imap_cache.db')
+
+
+class BaseModel(Model):
+    class Meta:
+        database = db
+
+
+class UIDMap(BaseModel):
+    folder_id = CharField()
+    uid = IntegerField()
+    graph_id = CharField()
+    received_date = CharField()
+
+    class Meta:
+        primary_key = CompositeKey('folder_id', 'uid')
+        indexes = (
+            (('folder_id', 'graph_id'), True),
+        )
+
+
+class UIDValidity(BaseModel):
+    folder_id = CharField(primary_key=True)
+    validity = IntegerField()
+
+
+class UIDCache:
+    """Persistent cache for UID<->Graph ID mapping and UIDVALIDITY"""
+
+    def __init__(self):
+        db.create_tables([UIDMap, UIDValidity])
+
+    def get_uidvalidity(self, folder_id):
+        """Get or create UIDVALIDITY for folder"""
+        validity_obj = UIDValidity.get_or_none(UIDValidity.folder_id == folder_id)
+        if validity_obj:
+            return validity_obj.validity
+
+        validity = int(time.time())
+        UIDValidity.create(folder_id=folder_id, validity=validity)
+        return validity
+
+    def get_uid_for_graph_id(self, folder_id, graph_id):
+        """Get existing UID for a Graph ID, or None if not cached"""
+        uid_map = UIDMap.get_or_none(
+            (UIDMap.folder_id == folder_id) & (UIDMap.graph_id == graph_id)
+        )
+        return uid_map.uid if uid_map else None
+
+    def get_next_uid(self, folder_id):
+        """Get the next available UID for this folder"""
+        max_uid = UIDMap.select(fn.MAX(UIDMap.uid)).where(
+            UIDMap.folder_id == folder_id
+        ).scalar() or 0
+        return max_uid + 1
+
+    def assign_uid(self, folder_id, graph_id, received_date, uid):
+        """Assign a specific UID to a Graph ID"""
+        UIDMap.get_or_create(
+            folder_id=folder_id,
+            uid=uid,
+            defaults={'graph_id': graph_id, 'received_date': received_date}
+        )
+
+    def get_graph_id(self, folder_id, uid):
+        """Get Graph ID from UID"""
+        uid_map = UIDMap.get_or_none(
+            (UIDMap.folder_id == folder_id) & (UIDMap.uid == uid)
+        )
+        return uid_map.graph_id if uid_map else None
+
+    def get_all_uids(self, folder_id):
+        """Get all UIDs for a folder, sorted"""
+        return {
+            row.uid: row.graph_id 
+            for row in UIDMap.select().where(UIDMap.folder_id == folder_id).order_by(UIDMap.uid)
+        }
+
 
 # IMAP response helpers
 def ok(tag, msg="OK"):
@@ -21,94 +101,6 @@ def no(tag, msg="NO"):
 
 def untagged(data):
     return f"* {data}\r\n"
-
-
-class UIDCache:
-    """Persistent cache for UID<->Graph ID mapping and UIDVALIDITY"""
-
-    def __init__(self, db_path="imap_cache.db"):
-        self.conn = sqlite3.connect(db_path)
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS uid_map (
-                folder_id TEXT,
-                uid INTEGER,
-                graph_id TEXT,
-                received_date TEXT,
-                PRIMARY KEY (folder_id, uid)
-            )
-        """)
-        self.conn.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_id 
-            ON uid_map(folder_id, graph_id)
-        """)
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS uidvalidity (
-                folder_id TEXT PRIMARY KEY,
-                validity INTEGER
-            )
-        """)
-        self.conn.commit()
-
-    def get_uidvalidity(self, folder_id):
-        """Get or create UIDVALIDITY for folder"""
-        cursor = self.conn.execute(
-            "SELECT validity FROM uidvalidity WHERE folder_id=?",
-            (folder_id,)
-        )
-        row = cursor.fetchone()
-        if row:
-            return row[0]
-
-        # Create new UIDVALIDITY
-        validity = int(time.time())
-        self.conn.execute(
-            "INSERT INTO uidvalidity VALUES (?, ?)",
-            (folder_id, validity)
-        )
-        self.conn.commit()
-        return validity
-
-    def get_uid_for_graph_id(self, folder_id, graph_id):
-        """Get existing UID for a Graph ID, or None if not cached"""
-        cursor = self.conn.execute(
-            "SELECT uid FROM uid_map WHERE folder_id=? AND graph_id=?",
-            (folder_id, graph_id)
-        )
-        row = cursor.fetchone()
-        return row[0] if row else None
-
-    def get_next_uid(self, folder_id):
-        """Get the next available UID for this folder"""
-        cursor = self.conn.execute(
-            "SELECT COALESCE(MAX(uid), 0) FROM uid_map WHERE folder_id=?",
-            (folder_id,)
-        )
-        return cursor.fetchone()[0] + 1
-
-    def assign_uid(self, folder_id, graph_id, received_date, uid):
-        """Assign a specific UID to a Graph ID"""
-        self.conn.execute(
-            "INSERT OR IGNORE INTO uid_map VALUES (?, ?, ?, ?)",
-            (folder_id, uid, graph_id, received_date)
-        )
-        self.conn.commit()
-
-    def get_graph_id(self, folder_id, uid):
-        """Get Graph ID from UID"""
-        cursor = self.conn.execute(
-            "SELECT graph_id FROM uid_map WHERE folder_id=? AND uid=?",
-            (folder_id, uid)
-        )
-        row = cursor.fetchone()
-        return row[0] if row else None
-
-    def get_all_uids(self, folder_id):
-        """Get all UIDs for a folder, sorted"""
-        cursor = self.conn.execute(
-            "SELECT uid, graph_id FROM uid_map WHERE folder_id=? ORDER BY uid",
-            (folder_id,)
-        )
-        return {row[0]: row[1] for row in cursor.fetchall()}
 
 
 class IMAPGraphProxy:
