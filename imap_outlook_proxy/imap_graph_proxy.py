@@ -5,7 +5,8 @@ Usage: python imap_graph_proxy.py
 """
 
 import asyncio
-import email
+import sqlite3
+import time
 from email.parser import BytesParser
 from msgraph import GraphServiceClient
 from azure.identity import DeviceCodeCredential
@@ -21,13 +22,102 @@ def no(tag, msg="NO"):
 def untagged(data):
     return f"* {data}\r\n"
 
+
+class UIDCache:
+    """Persistent cache for UID<->Graph ID mapping and UIDVALIDITY"""
+
+    def __init__(self, db_path="imap_cache.db"):
+        self.conn = sqlite3.connect(db_path)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS uid_map (
+                folder_id TEXT,
+                uid INTEGER,
+                graph_id TEXT,
+                received_date TEXT,
+                PRIMARY KEY (folder_id, uid)
+            )
+        """)
+        self.conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_id 
+            ON uid_map(folder_id, graph_id)
+        """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS uidvalidity (
+                folder_id TEXT PRIMARY KEY,
+                validity INTEGER
+            )
+        """)
+        self.conn.commit()
+
+    def get_uidvalidity(self, folder_id):
+        """Get or create UIDVALIDITY for folder"""
+        cursor = self.conn.execute(
+            "SELECT validity FROM uidvalidity WHERE folder_id=?",
+            (folder_id,)
+        )
+        row = cursor.fetchone()
+        if row:
+            return row[0]
+
+        # Create new UIDVALIDITY
+        validity = int(time.time())
+        self.conn.execute(
+            "INSERT INTO uidvalidity VALUES (?, ?)",
+            (folder_id, validity)
+        )
+        self.conn.commit()
+        return validity
+
+    def get_uid_for_graph_id(self, folder_id, graph_id):
+        """Get existing UID for a Graph ID, or None if not cached"""
+        cursor = self.conn.execute(
+            "SELECT uid FROM uid_map WHERE folder_id=? AND graph_id=?",
+            (folder_id, graph_id)
+        )
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+    def get_next_uid(self, folder_id):
+        """Get the next available UID for this folder"""
+        cursor = self.conn.execute(
+            "SELECT COALESCE(MAX(uid), 0) FROM uid_map WHERE folder_id=?",
+            (folder_id,)
+        )
+        return cursor.fetchone()[0] + 1
+
+    def assign_uid(self, folder_id, graph_id, received_date, uid):
+        """Assign a specific UID to a Graph ID"""
+        self.conn.execute(
+            "INSERT OR IGNORE INTO uid_map VALUES (?, ?, ?, ?)",
+            (folder_id, uid, graph_id, received_date)
+        )
+        self.conn.commit()
+
+    def get_graph_id(self, folder_id, uid):
+        """Get Graph ID from UID"""
+        cursor = self.conn.execute(
+            "SELECT graph_id FROM uid_map WHERE folder_id=? AND uid=?",
+            (folder_id, uid)
+        )
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+    def get_all_uids(self, folder_id):
+        """Get all UIDs for a folder, sorted"""
+        cursor = self.conn.execute(
+            "SELECT uid, graph_id FROM uid_map WHERE folder_id=? ORDER BY uid",
+            (folder_id,)
+        )
+        return {row[0]: row[1] for row in cursor.fetchall()}
+
+
 class IMAPGraphProxy:
-    def __init__(self, client: GraphServiceClient):
+    def __init__(self, client: GraphServiceClient, cache: UIDCache):
         self.client = client
+        self.cache = cache
         self.selected_folder = None
         self.folder_map = {}  # IMAP name -> Graph ID
         self.msg_map = {}     # UID -> Graph message ID
-        self.uid_counter = 1
 
     async def load_folders(self):
         """Load folder list from Graph API"""
@@ -49,12 +139,12 @@ class IMAPGraphProxy:
             self.folder_map[name] = folder.id
 
     async def load_messages(self, folder_id):
-        """Load messages from folder and assign UIDs"""
+        """Load messages from folder and assign UIDs using cache"""
         query_params = RequestConfiguration(
             query_parameters={
-                "$select": "id,subject,from,receivedDateTime,isRead",
-                "$orderby": "receivedDateTime desc",
-                "$top": 100
+                "$select": "id,from,receivedDateTime",
+                "$orderby": "receivedDateTime asc",
+                "$top": 1000
             }
         )
 
@@ -62,12 +152,24 @@ class IMAPGraphProxy:
             request_configuration=query_params
         )
 
-        self.msg_map = {}
-        self.uid_counter = 1
+        # Start with cached UIDs
+        self.msg_map = self.cache.get_all_uids(folder_id)
+        next_uid = self.cache.get_next_uid(folder_id)
 
+        # Process messages in order (oldest first)
         for msg in messages.value:
-            self.msg_map[self.uid_counter] = msg.id
-            self.uid_counter += 1
+            # Check if we already have a UID for this message
+            existing_uid = self.cache.get_uid_for_graph_id(folder_id, msg.id)
+
+            if existing_uid:
+                # Already cached, use existing UID
+                self.msg_map[existing_uid] = msg.id
+            else:
+                # New message, assign next UID
+                received_date = msg.received_date_time.isoformat() if msg.received_date_time else ""
+                self.cache.assign_uid(folder_id, msg.id, received_date, next_uid)
+                self.msg_map[next_uid] = msg.id
+                next_uid += 1
 
     async def handle_capability(self, tag):
         response = untagged("CAPABILITY IMAP4rev1 AUTH=PLAIN")
@@ -96,9 +198,14 @@ class IMAPGraphProxy:
         self.selected_folder = self.folder_map[folder_name]
         await self.load_messages(self.selected_folder)
 
+        uidvalidity = self.cache.get_uidvalidity(self.selected_folder)
+        uidnext = self.cache.get_next_uid(self.selected_folder)
         msg_count = len(self.msg_map)
+
         response = untagged(f"{msg_count} EXISTS")
         response += untagged("0 RECENT")
+        response += untagged(f"OK [UIDVALIDITY {uidvalidity}]")
+        response += untagged(f"OK [UIDNEXT {uidnext}]")
         response += untagged("FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)")
         response += ok(tag, "[READ-WRITE] SELECT completed")
         return response
@@ -182,7 +289,8 @@ class IMAPGraphProxy:
         response += ok(tag, "LOGOUT completed")
         return response
 
-async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+
+async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, cache: UIDCache):
     # Initialize Graph client
     credential = DeviceCodeCredential(
         client_id="YOUR_CLIENT_ID",
@@ -191,7 +299,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     scopes = ["https://graph.microsoft.com/.default"]
     client = GraphServiceClient(credential, scopes)
 
-    proxy = IMAPGraphProxy(client)
+    proxy = IMAPGraphProxy(client, cache)
 
     # Send greeting
     writer.write(b"* OK IMAP4rev1 Graph Proxy Ready\r\n")
@@ -242,16 +350,24 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
     except Exception as e:
         print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         writer.close()
         await writer.wait_closed()
 
 
 async def main():
-    server = await asyncio.start_server(handle_client, '127.0.0.1', 1143)
+    cache = UIDCache()
+
+    async def client_handler(reader, writer):
+        await handle_client(reader, writer, cache)
+
+    server = await asyncio.start_server(client_handler, '127.0.0.1', 1143)
 
     print("IMAP Graph Proxy listening on 127.0.0.1:1143")
     print("Configure your email client to connect to localhost:1143")
+    print(f"Cache database: imap_cache.db")
 
     async with server:
         await server.serve_forever()
