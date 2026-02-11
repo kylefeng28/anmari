@@ -91,6 +91,25 @@ class UIDCache:
             for row in UIDMap.select().where(UIDMap.folder_id == folder_id).order_by(UIDMap.uid)
         }
 
+    def get_date_range_for_uids(self, folder_id, start_uid, end_uid):
+        """Get min/max receivedDateTime for a UID range"""
+        query = (UIDMap
+                .select(fn.MIN(UIDMap.received_date).alias('min_date'),
+                       fn.MAX(UIDMap.received_date).alias('max_date'))
+                .where((UIDMap.folder_id == folder_id) & 
+                       (UIDMap.uid >= start_uid) & 
+                       (UIDMap.uid <= end_uid)))
+        result = query.get()
+        return result.min_date, result.max_date
+
+    def get_uid_map_for_graph_ids(self, folder_id, graph_ids):
+        """Get UID mapping for multiple Graph IDs"""
+        query = UIDMap.select().where(
+            (UIDMap.folder_id == folder_id) & 
+            (UIDMap.graph_id.in_(graph_ids))
+        )
+        return {row.graph_id: row.uid for row in query}
+
 
 class GraphEmailClient:
     def __init__(self, client: GraphServiceClient, cache: UIDCache):
@@ -236,30 +255,42 @@ class GraphEmailClient:
     async def fetch(self, uid_str, items):
         uids = self.parse_uids_range(uid_str)
 
+        select_fields = ["id", "subject", "from", "isRead", "flag", "receivedDateTime"]
+        if "ENVELOPE" in items.upper():
+            select_fields.extend(["sender", "toRecipients", "ccRecipients", "bccRecipients", "replyTo", "internetMessageId"])
+
+        # For ranges, use date-based filtering
+        if len(uids) > 5:
+            min_date, max_date = self.cache.get_date_range_for_uids(self.selected_folder, min(uids), max(uids))
+
+            if min_date and max_date:
+                query_params = MessagesRequestBuilder.MessagesRequestBuilderGetQueryParameters(
+                    select=select_fields,
+                    filter=f"receivedDateTime ge {min_date} and receivedDateTime le {max_date}"
+                )
+                request_config = RequestConfiguration(query_parameters=query_params)
+
+                result = await self.client.me.mail_folders.by_mail_folder_id(self.selected_folder).messages.get(
+                    request_configuration=request_config
+                )
+
+                # Map Graph IDs back to UIDs
+                graph_to_uid = self.cache.get_uid_map_for_graph_ids(self.selected_folder, [m.id for m in result.value])
+                return [(graph_to_uid[m.id], m) for m in result.value if m.id in graph_to_uid and graph_to_uid[m.id] in uids]
+
+        # For small ranges, fetch individually
         messages = []
         for uid in uids:
             if uid not in self.msg_map:
                 continue
 
-            msg_id = self.msg_map[uid]
-
-            # Fetch message details
-            select_fields = ["id", "subject", "from", "isRead", "flag", "receivedDateTime"]
-
-            # Add additional fields if ENVELOPE is requested
-            if "ENVELOPE" in items.upper():
-                select_fields.extend(["sender", "toRecipients", "ccRecipients", "bccRecipients", "replyTo", "internetMessageId"])
-
             query_params = RequestConfiguration(
-                query_parameters={
-                    "$select": ",".join(select_fields)
-                }
+                query_parameters={"$select": ",".join(select_fields)}
             )
 
-            msg = await self.client.me.messages.by_message_id(msg_id).get(
+            msg = await self.client.me.messages.by_message_id(self.msg_map[uid]).get(
                 request_configuration=query_params
             )
-
             messages.append((uid, msg))
 
         return messages
