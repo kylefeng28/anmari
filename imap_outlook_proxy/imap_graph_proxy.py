@@ -133,8 +133,10 @@ class GraphEmailClient:
         if folder_name not in self.folder_map:
             raise Exception('Folder not found')
 
-        self.selected_folder = self.folder_map[folder_name]
-        await self.load_messages(self.selected_folder)
+        # Only load if not already selected
+        if self.selected_folder != self.folder_map[folder_name]:
+            self.selected_folder = self.folder_map[folder_name]
+            await self.load_messages(self.selected_folder)
 
         uidvalidity = self.cache.get_uidvalidity(self.selected_folder)
         uidnext = self.cache.get_next_uid(self.selected_folder)
@@ -144,7 +146,6 @@ class GraphEmailClient:
 
     async def load_messages(self, folder_id):
         """Load messages from folder and assign UIDs using cache"""
-
         # Start at most recent message and go backwards until we hit a UID that we have seen before
         PAGE_SIZE = 100
         query_params = MessagesRequestBuilder.MessagesRequestBuilderGetQueryParameters(
@@ -224,6 +225,8 @@ class GraphEmailClient:
                 end_uid = int(end)
                 uids = [uid for uid in all_uids if start_uid <= uid <= end_uid]
 
+            return uids
+
         elif isinstance(uids_str, str):
             return [int(uid) for uid in uids_str.split(' ')]
 
@@ -241,9 +244,15 @@ class GraphEmailClient:
             msg_id = self.msg_map[uid]
 
             # Fetch message details
+            select_fields = ["id", "subject", "from", "isRead", "flag", "receivedDateTime"]
+
+            # Add additional fields if ENVELOPE is requested
+            if "ENVELOPE" in items.upper():
+                select_fields.extend(["sender", "toRecipients", "ccRecipients", "bccRecipients", "replyTo", "internetMessageId"])
+
             query_params = RequestConfiguration(
                 query_parameters={
-                    "$select": "id,subject,from,isRead,flag,receivedDateTime"
+                    "$select": ",".join(select_fields)
                 }
             )
 
@@ -304,6 +313,35 @@ class IMAPGraphProxy:
     def __init__(self, client: GraphEmailClient, cache: UIDCache):
         self.client = client
 
+    def format_address(self, addr):
+        """Format address as IMAP address structure: (name route mailbox host)"""
+        if not addr:
+            return "NIL"
+        name = f'"{addr.name}"' if addr.name else "NIL"
+        mailbox, _, host = addr.address.partition("@") if addr.address else ("", "", "")
+        return f'({name} NIL "{mailbox}" "{host}")'
+
+    def format_address_list(self, addr_list):
+        """Format list of addresses"""
+        if not addr_list:
+            return "NIL"
+        return "(" + " ".join(self.format_address(a.email_address) for a in addr_list) + ")"
+
+    def build_envelope(self, msg):
+        """Build ENVELOPE response per RFC 3501"""
+        date = f'"{msg.received_date_time.strftime("%d-%b-%Y %H:%M:%S %z")}"' if msg.received_date_time else "NIL"
+        subject = f'"{msg.subject}"' if msg.subject else "NIL"
+        from_addr = self.format_address_list([msg.from_] if msg.from_ else [])
+        sender = from_addr  # Graph API doesn't distinguish sender from from
+        reply_to = self.format_address_list(msg.reply_to) if hasattr(msg, 'reply_to') and msg.reply_to else "NIL"
+        to = self.format_address_list(msg.to_recipients) if hasattr(msg, 'to_recipients') and msg.to_recipients else "NIL"
+        cc = self.format_address_list(msg.cc_recipients) if hasattr(msg, 'cc_recipients') and msg.cc_recipients else "NIL"
+        bcc = self.format_address_list(msg.bcc_recipients) if hasattr(msg, 'bcc_recipients') and msg.bcc_recipients else "NIL"
+        in_reply_to = "NIL"  # Graph API doesn't expose this
+        message_id = f'"<{msg.internet_message_id}>"' if hasattr(msg, 'internet_message_id') and msg.internet_message_id else "NIL"
+
+        return f"({date} {subject} {from_addr} {sender} {reply_to} {to} {cc} {bcc} {in_reply_to} {message_id})"
+
     async def handle_capability(self, tag):
         response = untagged("CAPABILITY IMAP4rev1 AUTH=PLAIN")
         response += ok(tag, "CAPABILITY completed")
@@ -337,9 +375,11 @@ class IMAPGraphProxy:
 
         response = untagged(f"{msg_count} EXISTS")
         response += untagged("0 RECENT")
+        response += untagged(f"OK [UNSEEN {msg_count}]")
         response += untagged(f"OK [UIDVALIDITY {uidvalidity}]")
         response += untagged(f"OK [UIDNEXT {uidnext}]")
         response += untagged("FLAGS (\\Seen \\Answered \\Flagged \\Deleted \\Draft)")
+        response += untagged("OK [PERMANENTFLAGS (\\Seen \\Answered \\Flagged)]")
         response += ok(tag, "[READ-WRITE] SELECT completed")
         return response
 
@@ -373,8 +413,18 @@ class IMAPGraphProxy:
 
             flags_str = " ".join(flags) if flags else ""
 
-            if "UID" in items or "FLAGS" in items:
-                msg_parts.append(f'UID {uid} FLAGS ({flags_str})')
+            if "UID" in items:
+                msg_parts.append(f'UID {uid}')
+
+            if "FLAGS" in items:
+                msg_parts.append(f'FLAGS ({flags_str})')
+
+            debug('aaaaaa')
+            debug('items')
+            debug(items)
+            if "ENVELOPE" in items:
+                envelope = self.build_envelope(msg)
+                msg_parts.append(f'ENVELOPE {envelope}')
 
             has_header, has_body = False, False
 
@@ -490,17 +540,20 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             tag = parts[0]
 
             if parts[1].upper() == 'UID':
-                parts = [tag] + parts[2:]
-            command = parts[1].upper()
-            args = parts[2].split() if len(parts) > 2 else []
+                command = parts[2].upper()
+                args = parts[3:]
+            else:
+                command = parts[1].upper()
+                args = parts[2:]
 
-            response = ""
+            debug(f'command={command}, args={args}')
 
             async def send_response(response):
                 print(f">> {response}")
                 writer.write(response.encode())
                 await writer.drain()
 
+            response = ""
             if command == "CAPABILITY":
                 response = await proxy.handle_capability(tag)
             elif command == "LOGIN":
