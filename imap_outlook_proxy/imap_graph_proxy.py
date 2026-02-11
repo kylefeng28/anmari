@@ -144,24 +144,55 @@ class GraphEmailClient:
 
     async def load_messages(self, folder_id):
         """Load messages from folder and assign UIDs using cache"""
-        query_params = MessagesRequestBuilder.MessagesRequestBuilderGetQueryParameters(
-            select="id,from,receivedDateTime",
-            orderby=["receivedDateTime asc"],
-            top=100
-        )
-        request_configuration = RequestConfiguration(query_parameters=query_params)
 
-        messages = await self.client.me.mail_folders.by_mail_folder_id(folder_id).messages.get(
-            request_configuration=request_configuration
+        # Start at most recent message and go backwards until we hit a UID that we have seen before
+        PAGE_SIZE = 100
+        query_params = MessagesRequestBuilder.MessagesRequestBuilderGetQueryParameters(
+            select=["id", "from", "receivedDateTime"],
+            orderby=["receivedDateTime desc"],
+            top=PAGE_SIZE
         )
+
+        page = 0
+        skip_token = None
+        has_next_page = True
+
+        all_messages = []
+        debug('starting pagination loop')
+        while has_next_page:
+            debug(f'fetching page {page}')
+            query_params.skip = skip_token
+            request_configuration = RequestConfiguration(query_parameters=query_params)
+
+            page_result = await self.client.me.mail_folders.by_mail_folder_id(folder_id).messages.get(
+                request_configuration=request_configuration
+            )
+            page_messages = page_result.value
+            all_messages.extend(page_messages)
+
+            for msg in page_messages:
+                existing_uid = self.cache.get_uid_for_graph_id(folder_id, msg.id)
+                if existing_uid:
+                    debug(f'found page {page} with cached messages')
+                    has_next_page = False
+                    break
+
+            if not page_result.odata_next_link:
+                has_next_page = False
+                break
+
+            skip_token = PAGE_SIZE * page
+            page += 1
+        debug('done')
 
         # Start with cached UIDs
         self.msg_map = self.cache.get_all_uids(folder_id)
         next_uid = self.cache.get_next_uid(folder_id)
         debug(f'assigning uids starting from {next_uid}')
 
-        # Process messages in order (oldest first)
-        for msg in messages.value:
+        # Process messages in order (olrdest first)
+        all_messages.sort(key = lambda x: x.received_date_time)
+        for msg in all_messages:
             # Check if we already have a UID for this message
             existing_uid = self.cache.get_uid_for_graph_id(folder_id, msg.id)
 
@@ -272,27 +303,6 @@ def debug(s):
 class IMAPGraphProxy:
     def __init__(self, client: GraphEmailClient, cache: UIDCache):
         self.client = client
-
-    async def load_messages(self, folder_id):
-
-        # Start with cached UIDs
-        self.msg_map = self.cache.get_all_uids(folder_id)
-        next_uid = self.cache.get_next_uid(folder_id)
-
-        # Process messages in order (oldest first)
-        for msg in messages.value:
-            # Check if we already have a UID for this message
-            existing_uid = self.cache.get_uid_for_graph_id(folder_id, msg.id)
-
-            if existing_uid:
-                # Already cached, use existing UID
-                self.msg_map[existing_uid] = msg.id
-            else:
-                # New message, assign next UID
-                received_date = msg.received_date_time.isoformat() if msg.received_date_time else ""
-                self.cache.assign_uid(folder_id, msg.id, received_date, next_uid)
-                self.msg_map[next_uid] = msg.id
-                next_uid += 1
 
     async def handle_capability(self, tag):
         response = untagged("CAPABILITY IMAP4rev1 AUTH=PLAIN")
