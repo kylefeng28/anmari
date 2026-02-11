@@ -8,6 +8,13 @@ from azure.core.credentials import AccessToken
 from msal import ConfidentialClientApplication, PublicClientApplication
 
 
+# For testing purposes (with dev-proxy plugin)
+class DummyCredential:
+    def get_token(*args, **kwargs):
+        print(f'args={args}, kwargs={kwargs}')
+        return AccessToken('dummy', expires_on=None)
+
+
 class AuthCodeCredential:
     """Custom credential that exchanges auth code for access token using MSAL"""
 
