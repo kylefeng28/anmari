@@ -171,6 +171,40 @@ class EmailCache:
         )
         self.conn.commit()
 
+    def copy_message(self, source_uid: int, source_folder: str, dest_uid: int, dest_folder: str):
+        """Copy message from one folder to another (for MOVE optimization)
+
+        This avoids re-downloading the message from the server after a move.
+        """
+        _require_folder(source_folder)
+        _require_folder(dest_folder)
+
+        # Copy message data
+        self.conn.execute(
+            """INSERT OR REPLACE INTO messages 
+               (uid, folder, from_addr, from_name, subject, date, body_preview, full_body, flags)
+               SELECT ?, ?, from_addr, from_name, subject, date, body_preview, full_body, flags
+               FROM messages WHERE uid = ? AND folder = ?""",
+            (dest_uid, dest_folder, source_uid, source_folder)
+        )
+
+        # Copy tags
+        self.conn.execute(
+            """INSERT OR IGNORE INTO tags (uid, folder, tag)
+               SELECT ?, ?, tag FROM tags WHERE uid = ? AND folder = ?""",
+            (dest_uid, dest_folder, source_uid, source_folder)
+        )
+
+        # Copy Gmail labels
+        self.conn.execute(
+            """INSERT OR IGNORE INTO gm_labels (uid, folder, label)
+               SELECT ?, ?, label FROM gm_labels WHERE uid = ? AND folder = ?""",
+            (dest_uid, dest_folder, source_uid, source_folder)
+        )
+
+        self.conn.commit()
+        print(f'Copied message {source_uid} from {source_folder} to {dest_uid} in {dest_folder} (local cache)')
+
     def get_last_seen_uid(self, folder: str) -> Optional[int]:
         """Get highest UID in cache"""
         _require_folder(folder)

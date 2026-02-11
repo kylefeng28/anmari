@@ -537,10 +537,20 @@ def apply(account: int, dry_run: bool, action_id: Optional[int]):
 
             # Execute action
             if action.action_type == 'move':
-                email_client.move_messages(uids, action.folder, action.action_data['dest'])
-                affected_folders.add(action.folder)
-                affected_folders.add(action.action_data['dest'])
-                click.echo(f"  ✓ Moved {len(uids)} messages")
+                source_folder = action.folder
+                dest_folder = action.action_data['dest']
+                uid_map = email_client.move_messages(uids, source_folder, dest_folder)
+                affected_folders.add(source_folder)
+                affected_folders.add(dest_folder)
+
+                # If UIDPLUS is supported, copy messages in cache instead of re-downloading
+                if uid_map:
+                    moved = email_client.move_messages_local(uid_map, source_folder, dest_folder)
+                    if moved == len(uid_map):
+                        click.echo(f"  ✓ Moved {len(uid_map)} messages in local cache (COPYUID optimization)")
+                    else:
+                        click.echo(f"  ✓ Moved {i} of {len(uid_map)} messages in local cache")
+                        click.echo(f"  Warning: Could not complete local move using COPYUID optimization (will expunge+fetch during next sync)")
 
             elif action.action_type == 'add_flag':
                 email_client.add_flags(uids, action.folder, action.action_data['flags'])

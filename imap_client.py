@@ -420,24 +420,80 @@ class EmailImapClient:
             self.client.remove_gmail_labels(uids, labels)
 
     def move_messages(self, uids: list, source_folder: str, dest_folder: str):
-        """Move messages to another folder (COPY + DELETE + EXPUNGE)"""
+        """Move messages to another folder (COPY + DELETE + EXPUNGE)
+
+        Returns dict mapping source UIDs to destination UIDs if UIDPLUS is supported,
+        otherwise returns None.
+        """
         with self.select_folder_write(source_folder):
             # print(f'[debug] move uids {uids} from {source_folder} to {dest_folder}')
 
             if self.has_move:
                 print('Server supports MOVE command')
-                self.client.move(uids, dest_folder)
-
+                result = self.client.move(uids, dest_folder)
             else:
                 print('Server does not support MOVE command; using a COPY + DELETE instead')
-
-                # Copy to destination
-                self.client.copy(uids, dest_folder)
-
-                # Mark as deleted
+                result = self.client.copy(uids, dest_folder)
                 self.client.delete_messages(uids)
-
-                # Expunge deleted messages
                 self.client.expunge()
 
-            # TODO: can optimize by preventing (delete from local cache + download message from server) by using COPYUID
+            # Check for COPYUID in untagged responses
+            # IMAPClient stores response codes in _imap.untagged_responses
+            # Format: [COPYUID uidvalidity source_uids dest_uids]
+            # Example: [COPYUID 38505 304,319:320 3956:3958]
+            try:
+                # Try to get COPYUID from the last command's response
+                if hasattr(self.client, '_imap') and hasattr(self.client._imap, 'untagged_responses'):
+                    responses = self.client._imap.untagged_responses
+                    if 'COPYUID' in responses:
+                        copyuid_raw = responses['COPYUID'][-1]  # Get last COPYUID
+                        # Parse: b'38505 304,319:320 3956:3958'
+                        parts = copyuid_raw.decode().split()
+                        if len(parts) == 3:
+                            uidvalidity, source_set, dest_set = parts
+
+                            source_uids = self._parse_uid_set(source_set)
+                            dest_uids = self._parse_uid_set(dest_set)
+
+                            if len(source_uids) == len(dest_uids):
+                                uid_map = dict(zip(source_uids, dest_uids))
+                                print(f'COPYUID mapping: {uid_map}')
+                                return uid_map
+                        else:
+                            print(f'source_uids and dest_uids do not match! ({len(source_uids)} vs {len(dest_uids)})')
+                            return None
+            except Exception as e:
+                print(f'Could not parse COPYUID response: {e}')
+                return None
+
+    def move_messages_local(self, uid_map: dict[int, int], source_folder: str, dest_folder: str):
+        i = 0
+        try:
+            for source_uid, dest_uid in uid_map.items():
+                self.cache.copy_message(source_uid, source_folder, dest_uid, dest_folder)
+                self.cache.delete_message(source_uid, source_folder)
+                i += 1
+            return i
+        except Exception as e:
+            print(e)
+            return i
+
+    def _parse_uid_set(self, uid_set):
+        """Parse IMAP UID set string into list of UIDs
+
+        Examples:
+            '304' -> [304]
+            '304,319:320' -> [304, 319, 320]
+            '3956:3958' -> [3956, 3957, 3958]
+        """
+        if isinstance(uid_set, bytes):
+            uid_set = uid_set.decode()
+
+        uids = []
+        for part in str(uid_set).split(','):
+            if ':' in part:
+                start, end = part.split(':')
+                uids.extend(range(int(start), int(end) + 1))
+            else:
+                uids.append(int(part))
+        return uids
