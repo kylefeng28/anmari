@@ -100,6 +100,11 @@ class EmailImapClient:
 
         # print(f'[debug] Capabilities: {self.client.capabilities()}')
 
+        # Gmail IMAP Capabilities:
+        # ('IMAP4REV1', 'UNSELECT', 'IDLE', 'NAMESPACE', 'QUOTA', 'ID', 'XLIST', 'CHILDREN', 'X-GM-EXT-1', 'UIDPLUS', 'COMPRESS=DEFLATE', 'ENABLE', 'MOVE', 'CONDSTORE', 'ESEARCH', 'UTF8=ACCEPT', 'LIST-EXTENDED', 'LIST-STATUS', 'LITERAL-', 'SPECIAL-USE', 'APPENDLIMIT=35651584')
+
+        self.has_move = self.client.has_capability('MOVE')
+
         # Check and enable CONDSTORE capability
         self.has_condstore = self.client.has_capability('CONDSTORE')
         if self.has_condstore:
@@ -281,7 +286,7 @@ class EmailImapClient:
                         flags)
 
                     # Store Gmail labels if available
-                    if gm_labels:
+                    if self.is_gmail and gm_labels is not None:
                         self.cache.set_gm_labels(uid, folder, gm_labels)
 
                     new += 1
@@ -306,12 +311,13 @@ class EmailImapClient:
                         updated += 1
 
                     # Store Gmail labels if available
-                    cached_gm_labels = self.cache.get_gm_labels(uid, folder)
-                    if cached_gm_labels != gm_labels:
-                        print(f'Updating Gmail labels for {uid} in cache')
-                        print(f'  Old labels: {cached_gm_labels}')
-                        print(f'  New labels: {gm_labels}')
-                        self.cache.set_gm_labels(uid, folder, gm_labels)
+                    if self.is_gmail:
+                        cached_gm_labels = self.cache.get_gm_labels(uid, folder)
+                        if cached_gm_labels != gm_labels:
+                            print(f'Updating Gmail labels for {uid} in cache')
+                            print(f'  Old labels: {cached_gm_labels}')
+                            print(f'  New labels: {gm_labels}')
+                            self.cache.set_gm_labels(uid, folder, gm_labels)
 
                 else:
                     click.echo(f"UID {uid} not found in cache!")
@@ -418,13 +424,20 @@ class EmailImapClient:
         with self.select_folder_write(source_folder):
             # print(f'[debug] move uids {uids} from {source_folder} to {dest_folder}')
 
-            # Copy to destination
-            self.client.copy(uids, dest_folder)
+            if self.has_move:
+                print('Server supports MOVE command')
+                self.client.move(uids, dest_folder)
 
-            # Mark as deleted
-            self.client.delete_messages(uids)
+            else:
+                print('Server does not support MOVE command; using a COPY + DELETE instead')
 
-            # Expunge deleted messages
-            self.client.expunge()
+                # Copy to destination
+                self.client.copy(uids, dest_folder)
+
+                # Mark as deleted
+                self.client.delete_messages(uids)
+
+                # Expunge deleted messages
+                self.client.expunge()
 
             # TODO: can optimize by preventing (delete from local cache + download message from server) by using COPYUID

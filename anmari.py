@@ -280,6 +280,7 @@ def queue():
 def _queue_move(account: int, folder: str, to: str, query: tuple):
     config = init_config(account)
     cache = init_cache(account, config)
+    action_queue = ActionQueue(cache)
 
     # Search to get message count
     results = cache.search(folder, query)
@@ -317,6 +318,7 @@ def queue_archive(account: int, folder: str, query: tuple):
 def _queue_flag(account: int, folder: str, add: tuple, remove: tuple, query: tuple):
     config = init_config(account)
     cache = init_cache(account, config)
+    action_queue = ActionQueue(cache)
 
     results = cache.search(folder, query)
 
