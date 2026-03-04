@@ -1,4 +1,8 @@
 use clap::{Parser, Subcommand};
+use log::{info};
+use env_logger;
+
+mod config;
 
 #[derive(Parser)]
 #[command(name = "anmari")]
@@ -135,60 +139,81 @@ enum QueueAction {
 
 fn main() {
     let cli = Cli::parse();
+    env_logger::init();
+
+    // Load config
+    let config = match config::Config::load() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("Error loading config: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Get first account (default)
+    let account = match config.get_account(0) {
+        Some(acc) => acc,
+        None => {
+            eprintln!("Error: No accounts configured");
+            std::process::exit(1);
+        }
+    };
+
+    info!("Using account: {}", account.email);
 
     match cli.command {
         Commands::Sync { folder, all_folders, page_size } => {
-            println!("Sync: folder={:?}, all_folders={}, page_size={}", 
+            info!("Sync: folder={:?}, all_folders={}, page_size={}", 
                      folder, all_folders, page_size);
         }
         Commands::Search { query } => {
-            println!("Search: {}", query);
+            info!("Search: {}", query);
         }
         Commands::Tag { args } => {
-            println!("Tag: {:?}", args);
+            info!("Tag: {:?}", args);
         }
         Commands::Queue { action } => {
             match action {
                 QueueAction::Move { to, query } => {
-                    println!("Queue move to '{}': {:?}", to, query);
+                    info!("Queue move to '{}': {:?}", to, query);
                 }
                 QueueAction::Archive { query } => {
-                    println!("Queue archive: {:?}", query);
+                    info!("Queue archive: {:?}", query);
                 }
                 QueueAction::Flag { add, remove, query } => {
-                    println!("Queue flag: add={:?}, remove={:?}, query={:?}", add, remove, query);
+                    info!("Queue flag: add={:?}, remove={:?}, query={:?}", add, remove, query);
                 }
                 QueueAction::Label { add, remove, query } => {
-                    println!("Queue label: add={:?}, remove={:?}, query={:?}", add, remove, query);
+                    info!("Queue label: add={:?}, remove={:?}, query={:?}", add, remove, query);
                 }
                 QueueAction::Markread { query } => {
-                    println!("Queue markread: {:?}", query);
+                    info!("Queue markread: {:?}", query);
                 }
                 QueueAction::Markunread { query } => {
-                    println!("Queue markunread: {:?}", query);
+                    info!("Queue markunread: {:?}", query);
                 }
                 QueueAction::Clear => {
-                    println!("Queue clear");
+                    info!("Queue clear");
                 }
                 QueueAction::Undo { count } => {
-                    println!("Queue undo: count={}", count);
+                    info!("Queue undo: count={}", count);
                 }
             }
         }
         Commands::Status => {
-            println!("Status");
+            info!("Status");
         }
         Commands::Apply { dry_run } => {
-            println!("Apply: dry_run={}", dry_run);
+            info!("Apply: dry_run={}", dry_run);
         }
         Commands::Folders => {
-            println!("Folders");
+            info!("Folders");
         }
         Commands::Cleanup => {
-            println!("Cleanup");
+            info!("Cleanup");
         }
         Commands::Repl => {
-            println!("REPL");
+            info!("REPL");
         }
     }
 }
