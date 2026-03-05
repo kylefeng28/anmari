@@ -1,9 +1,15 @@
 use log::{debug};
-use std::{net::TcpStream, sync::Arc};
+use std::{collections::HashMap, net::TcpStream, num::NonZeroU32, sync::Arc};
 
 use io_imap::{
     context::ImapContext,
-    coroutines::{greeting_with_capability::*, login::*},
+    coroutines::{greeting_with_capability::*, login::*, select::*, fetch::*},
+    types::{
+        core::Vec1,
+        fetch::{MacroOrMessageDataItemNames, MessageDataItem},
+        mailbox::Mailbox,
+        sequence::SequenceSet,
+    },
 };
 use io_stream::runtimes::std::handle;
 use rustls::{ClientConfig, ClientConnection, StreamOwned};
@@ -75,5 +81,54 @@ impl ImapClient {
         debug!("Connected and authenticated!");
         // debug!("Capabilities: {:#?}", self.context.capability);
         debug!("Authenticated: {}", self.context.authenticated);
+    }
+
+    pub fn select(
+        &mut self,
+        mailbox: Mailbox<'static>,
+    ) -> Result<SelectData, Box<dyn std::error::Error>> {
+        let mut arg = None;
+        let context = std::mem::replace(&mut self.context, ImapContext::new());
+        let mut coroutine = ImapSelect::new(context, mailbox);
+
+        loop {
+            match coroutine.resume(arg.take()) {
+                ImapSelectResult::Ok { context, data } => {
+                    self.context = context;
+                    return Ok(data);
+                }
+                ImapSelectResult::Io { io } => arg = Some(handle(&mut self.stream, io)?),
+                ImapSelectResult::Err { context, err } => {
+                    self.context = context;
+                    return Err(format!("Select error: {}", err).into())
+                }
+            }
+        }
+    }
+
+    pub fn fetch(
+        &mut self,
+        sequence_set: SequenceSet,
+        items: MacroOrMessageDataItemNames<'static>,
+        uid: bool,
+    ) -> Result<HashMap<NonZeroU32, Vec1<MessageDataItem<'static>>>, Box<dyn std::error::Error>>
+    {
+        let mut arg = None;
+        let context = std::mem::replace(&mut self.context, ImapContext::new());
+        let mut coroutine = ImapFetch::new(context, sequence_set, items, uid);
+
+        loop {
+            match coroutine.resume(arg.take()) {
+                ImapFetchResult::Ok { context, data } => {
+                    self.context = context;
+                    return Ok(data);
+                }
+                ImapFetchResult::Io { io } => arg = Some(handle(&mut self.stream, io)?),
+                ImapFetchResult::Err { context, err } => {
+                    self.context = context;
+                    return Err(format!("Fetch error: {}", err).into())
+                }
+            }
+        }
     }
 }

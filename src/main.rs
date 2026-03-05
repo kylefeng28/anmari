@@ -5,6 +5,7 @@ use env_logger;
 mod config;
 mod imap;
 mod cache;
+mod sync;
 
 #[derive(Parser)]
 #[command(name = "anmari")]
@@ -209,7 +210,7 @@ fn main() {
     }
 
     // Connect to IMAP
-    let client = match imap::ImapClient::connect(account) {
+    let mut client = match imap::ImapClient::connect(account) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Error connecting to IMAP: {}", e);
@@ -223,6 +224,14 @@ fn main() {
         Commands::Sync { folder, all_folders, page_size } => {
             info!("Sync: folder={:?}, all_folders={}, page_size={}", 
                      folder, all_folders, page_size);
+
+            let folder_to_sync = folder.as_deref().unwrap_or("INBOX");
+            let mut syncer = sync::Syncer::new(&mut client, &cache);
+
+            match syncer.sync_folder(folder_to_sync) {
+                Ok(_) => info!("Sync completed successfully"),
+                Err(e) => eprintln!("Sync error: {}", e),
+            }
         }
         Commands::Search { query } => {
             info!("Search: {}", query);
