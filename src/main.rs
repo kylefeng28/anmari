@@ -4,6 +4,7 @@ use env_logger;
 
 mod config;
 mod imap;
+mod cache;
 
 #[derive(Parser)]
 #[command(name = "anmari")]
@@ -161,6 +162,51 @@ fn main() {
     };
 
     info!("Using account: {}", account.email);
+
+    // Initialize cache
+    let cache = match cache::EmailCache::new(0) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error initializing cache: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    println!("Cache initialized");
+
+    // Test get_message with a real message
+    let uid = 1;
+    match cache.get_message(uid, "INBOX") {
+        Ok(Some(msg)) => {
+            println!("Found cached message:");
+            println!("  uid: {}", msg.uid);
+            println!("  folder: {}", msg.folder);
+            println!("  from: {}", msg.from_addr);
+            println!("  subject: {}", msg.subject);
+            println!("  flags: {}", msg.flags);
+        }
+        Ok(None) => {
+            println!("No message found with uid={} in INBOX", uid);
+        }
+        Err(e) => {
+            println!("Error querying message: {}", e);
+        }
+    }
+
+    // Test get_folder_state
+    match cache.get_folder_state("INBOX") {
+        Ok(Some(state)) => {
+            println!("\nFolder state for INBOX:");
+            println!("  uidvalidity: {}", state.uidvalidity);
+            println!("  highestmodseq: {}", state.highestmodseq);
+        }
+        Ok(None) => {
+            println!("\nNo folder state found for INBOX");
+        }
+        Err(e) => {
+            println!("\nError querying folder state: {}", e);
+        }
+    }
 
     // Connect to IMAP
     let client = match imap::ImapClient::connect(account) {

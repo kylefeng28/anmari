@@ -73,7 +73,7 @@ impl ImapClient {
 
     pub fn print_status_debug(&self) {
         debug!("Connected and authenticated!");
-        debug!("Capabilities: {:#?}", self.context.capability);
+        // debug!("Capabilities: {:#?}", self.context.capability);
         debug!("Authenticated: {}", self.context.authenticated);
     }
 }
