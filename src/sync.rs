@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::num::NonZeroU32;
 use io_imap::{
     types::{
+        core::Vec1,
         flag::FlagFetch,
         fetch::{MacroOrMessageDataItemNames, MessageDataItem},
         mailbox::Mailbox,
@@ -52,7 +53,8 @@ impl<'a> Syncer<'a> {
 
         // Determine if we should use CONDSTORE
         let cached_highestmodseq = cached_state.as_ref().map(|s| s.highestmodseq).unwrap_or(0);
-        let use_condstore = highestmodseq > 0 && cached_highestmodseq > 0 && last_seen_uid > 0;
+        // let use_condstore = highestmodseq > 0 && cached_highestmodseq > 0 && last_seen_uid > 0;
+        let use_condstore = false;
 
         let (total_new, total_updated, total_expunged) = self.sync(folder, last_seen_uid, use_condstore, cached_highestmodseq, highestmodseq)?;
 
@@ -96,6 +98,15 @@ impl<'a> Syncer<'a> {
         Ok((total_new, total_updated, total_expunged))
     }
 
+    fn get_uid(items: Vec1<MessageDataItem>) -> Option<NonZeroU32> {
+        for item in items {
+            if let MessageDataItem::Uid(uid) = item {
+                return Some(uid);
+            }
+        }
+        None
+    }
+
     fn fetch_new_messages(
         &mut self,
         last_seen_uid: u32,
@@ -114,10 +125,11 @@ impl<'a> Syncer<'a> {
         let mut new_uids = HashSet::new();
         let mut new_count = 0;
 
-        for (uid, items) in new_messages {
+        for (seq, items) in new_messages {
+            let uid = Self::get_uid(items.clone()).unwrap();
             new_uids.insert(uid);
             new_count += 1;
-            println!("  New message: UID {}", uid);
+            println!("  New message {}: UID {} ({:?})", seq, uid, items);
 
             for item in items.as_ref() {
                 if let MessageDataItem::Envelope(env) = item {
@@ -178,7 +190,8 @@ impl<'a> Syncer<'a> {
         let mut updated_uids = HashSet::new();
         let mut updated_count = 0;
 
-        for (uid, _) in flag_updates {
+        for (_seq, items) in flag_updates {
+            let uid = Self::get_uid(items).unwrap();
             updated_uids.insert(uid);
             updated_count += 1;
         }
@@ -207,7 +220,8 @@ impl<'a> Syncer<'a> {
         let mut updated_uids = HashSet::new();
         let mut updated_count = 0;
 
-        for (uid, items) in flag_updates {
+        for (_seq, items) in flag_updates {
+            let uid = Self::get_uid(items.clone()).unwrap();
             for item in items.as_ref() {
                 if let MessageDataItem::Flags(flags) = item {
                     if let Some(cached_msg) = self.cache.get_message(uid.get(), folder)? {
