@@ -116,7 +116,7 @@ impl<'a> Syncer<'a> {
         let start_uid = last_seen_uid + 1;
         let sequence_set = SequenceSet::try_from(format!("{}:*", start_uid).as_str())?;
         let fetch_items = MacroOrMessageDataItemNames::Macro(
-            io_imap::types::fetch::Macro::Fast,
+            io_imap::types::fetch::Macro::All,
         );
 
         let new_messages = self.client.fetch(sequence_set, fetch_items, true)?;
@@ -125,20 +125,25 @@ impl<'a> Syncer<'a> {
         let mut new_uids = HashSet::new();
         let mut new_count = 0;
 
+        // Decode MIME encoded words (RFC 2047)
+        use rfc2047_decoder::{Decoder, RecoverStrategy};
+        let decoder = Decoder::new()
+            .too_long_encoded_word_strategy(RecoverStrategy::Skip);
+
         for (seq, items) in new_messages {
             let uid = Self::get_uid(items.clone()).unwrap();
             new_uids.insert(uid);
             new_count += 1;
-            println!("  New message {}: UID {} ({:?})", seq, uid, items);
+            println!("  New message {}: UID {}", seq, uid);
 
             for item in items.as_ref() {
                 if let MessageDataItem::Envelope(env) = item {
                     let subject = match &env.subject.0 {
-                        Some(s) => String::from_utf8_lossy(s.as_ref()),
-                        None => "".into(),
+                        // Some(s) => String::from_utf8_lossy(s.as_ref()),
+                        Some(s) => decoder.clone().decode(s).unwrap(),
+                        None => "(no subject)".into(),
                     };
                     println!("    Subject: {}", subject);
-                    // TODO insert into cache
                 }
             }
         }

@@ -17,3 +17,4 @@ secrecy = "0.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
 log = "0.4.29"
 env_logger = "0.11.9"
+rfc2047-decoder = "1.1.0"
