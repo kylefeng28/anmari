@@ -13,6 +13,50 @@ use io_imap::{
 
 use crate::{cache::EmailCache, imap::ImapClient};
 
+#[derive(Debug, Clone)]
+struct NewMessage {
+    uid: u32,
+    from_addr: String,
+    from_name: Option<String>,
+    subject: String,
+    date: String,
+    flags: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct FlagUpdate {
+    uid: u32,
+    flags: Vec<String>,
+}
+
+impl FlagUpdate {
+    pub fn new(items: Vec1<MessageDataItem>) -> FlagUpdate {
+        let mut uid = None;
+        let mut flags = Vec::new();
+
+        for item in items.as_ref() {
+            if let MessageDataItem::Uid(_uid) = item {
+                uid = Some(_uid)
+            }
+            if let MessageDataItem::Flags(_flags) = item {
+                flags = get_flags(_flags);
+            }
+        }
+
+        FlagUpdate {
+            uid: uid.unwrap().get(),
+            flags,
+        }
+    }
+}
+
+fn get_flags(flags: &Vec<FlagFetch>) -> Vec<String> {
+    flags.iter().map(|f| match f {
+        FlagFetch::Flag(flag) => format!("{}", flag),
+        FlagFetch::Recent => "\\Recent".to_string(),
+    }).collect()
+}
+
 pub struct Syncer<'a> {
     client: &'a mut ImapClient,
     cache: &'a EmailCache,
@@ -23,7 +67,7 @@ impl<'a> Syncer<'a> {
         Self { client, cache }
     }
 
-    pub fn sync_folder(&mut self, folder: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn sync_folder(&mut self, folder: &str, use_fallback: bool, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
         println!("=== Syncing folder: {} ===\n", folder);
 
         // Select the folder
@@ -49,14 +93,18 @@ impl<'a> Syncer<'a> {
         }
 
         // Get last seen UID from cache
-        let last_seen_uid = self.cache.get_last_seen_uid(folder)?.unwrap_or(0);
+        let last_seen_uid = self.cache.get_last_seen_uid(folder)?;
 
         // Determine if we should use CONDSTORE
         let cached_highestmodseq = cached_state.as_ref().map(|s| s.highestmodseq).unwrap_or(0);
-        // let use_condstore = highestmodseq > 0 && cached_highestmodseq > 0 && last_seen_uid > 0;
-        let use_condstore = false;
+        let mut use_condstore = highestmodseq > 0 && cached_highestmodseq > 0 && last_seen_uid.map(|x| x > 0).unwrap_or(false);
 
-        let (total_new, total_updated, total_expunged) = self.sync(folder, last_seen_uid, use_condstore, cached_highestmodseq, highestmodseq)?;
+        if use_condstore && use_fallback {
+            println!("Using fallback due to --fallback flag even though CONDSTORE support is detected\n");
+            use_condstore = false;
+        }
+
+        let (total_new, total_updated, total_expunged) = self.sync(folder, last_seen_uid, use_condstore, cached_highestmodseq, highestmodseq, dry_run)?;
 
         // Update folder state
         // TODO update uidvalidity, highestmodseq
@@ -69,10 +117,11 @@ impl<'a> Syncer<'a> {
     fn sync(
         &mut self,
         folder: &str,
-        last_seen_uid: u32,
+        last_seen_uid: Option<u32>,
         use_condstore: bool,
         cached_highestmodseq: u64,
         current_highestmodseq: u64,
+        dry_run: bool,
     ) -> Result<(usize, usize, usize), Box<dyn std::error::Error>> {
 
         if use_condstore {
@@ -80,20 +129,79 @@ impl<'a> Syncer<'a> {
                 cached_highestmodseq, current_highestmodseq);
         }
 
+        let last_seen_uid = last_seen_uid.unwrap_or(1);
+
         // Step 1: Fetch new messages
-        let (_new_message_uids, total_new) = self.fetch_new_messages(last_seen_uid)?;
+        let new_messages = self.fetch_new_messages(folder, last_seen_uid)?;
+        let total_new = new_messages.len();
 
         // Step 2: Fetch flag changes to old messages
-        let (_updated_message_uids, total_updated) = self.fetch_flag_updates(
+        let flag_updates = self.fetch_flag_updates(
             folder,
             last_seen_uid,
             use_condstore,
             cached_highestmodseq,
             current_highestmodseq)?;
+        let total_updated = flag_updates.len();
 
         // Step 3: Detect expunged
-        let server_uids = self.get_server_uids()?;
-        let (_, total_expunged) = self.detect_expunged_messages(folder, &server_uids)?;
+        let server_uids = self.get_server_uids(1, last_seen_uid)?;
+        let expunged_uids = self.detect_expunged_messages(folder, &server_uids)?;
+        let total_expunged = expunged_uids.len();
+
+        println!();
+
+        // Update cache
+        let prefix = if dry_run {
+            println!("[DRY RUN - not updating cache]");
+            "[DRY RUN] "
+        } else {
+            ""
+        };
+
+        let mut total_new_cache = 0;
+        for msg in new_messages {
+            if !dry_run {
+                self.cache.insert_message(
+                    msg.uid,
+                    folder,
+                    &msg.from_addr,
+                    msg.from_name.as_deref(),
+                    &msg.subject,
+                    &msg.date,
+                    &msg.flags,
+                )?;
+            }
+            total_new_cache += 1;
+        }
+        println!("{}Added {} messages to cache", prefix, total_new_cache);
+
+        let mut total_updated_cache = 0;
+        for flag_update in flag_updates {
+            if !dry_run {
+                self.cache.update_message_flags(
+                    flag_update.uid,
+                    folder,
+                    &flag_update.flags,
+                )?;
+            }
+            total_updated_cache += 1;
+        }
+        println!("{}Updated {} messages in cache", prefix, total_updated_cache);
+
+        let mut total_expunged_cache = 0;
+        for expunged_uid in expunged_uids {
+            if !dry_run {
+                self.cache.delete_message(
+                    expunged_uid,
+                    folder,
+                )?;
+            }
+            total_expunged_cache += 1;
+        }
+        println!("{}Deleted {} messages in cache", prefix, total_expunged_cache);
+
+        println!();
 
         Ok((total_new, total_updated, total_expunged))
     }
@@ -101,7 +209,7 @@ impl<'a> Syncer<'a> {
     fn get_uid(items: Vec1<MessageDataItem>) -> Option<NonZeroU32> {
         for item in items {
             if let MessageDataItem::Uid(uid) = item {
-                return Some(uid);
+                return Some(uid)
             }
         }
         None
@@ -109,8 +217,9 @@ impl<'a> Syncer<'a> {
 
     fn fetch_new_messages(
         &mut self,
+        folder: &str,
         last_seen_uid: u32,
-    ) -> Result<(HashSet<NonZeroU32>, usize), Box<dyn std::error::Error>> {
+    ) -> Result<Vec<NewMessage>, Box<dyn std::error::Error>> {
         println!("Step 1: Fetching new messages since last sync (UID {})", last_seen_uid);
 
         let start_uid = last_seen_uid + 1;
@@ -119,37 +228,75 @@ impl<'a> Syncer<'a> {
             io_imap::types::fetch::Macro::All,
         );
 
-        let new_messages = self.client.fetch(sequence_set, fetch_items, true)?;
-        println!("  Found {} new messages", new_messages.len());
-
-        let mut new_uids = HashSet::new();
-        let mut new_count = 0;
+        let fetched = self.client.fetch(sequence_set, fetch_items, true)?;
+        println!("  Found {} new messages", fetched.len());
 
         // Decode MIME encoded words (RFC 2047)
         use rfc2047_decoder::{Decoder, RecoverStrategy};
         let decoder = Decoder::new()
             .too_long_encoded_word_strategy(RecoverStrategy::Skip);
 
-        for (seq, items) in new_messages {
+        let mut new_messages = Vec::new();
+
+        for (seq, items) in fetched {
             let uid = Self::get_uid(items.clone()).unwrap();
-            new_uids.insert(uid);
-            new_count += 1;
             println!("  New message {}: UID {}", seq, uid);
 
+            let mut envelope_data = None;
+            let mut flags_data = Vec::new();
+
             for item in items.as_ref() {
-                if let MessageDataItem::Envelope(env) = item {
-                    let subject = match &env.subject.0 {
-                        // Some(s) => String::from_utf8_lossy(s.as_ref()),
-                        Some(s) => decoder.clone().decode(s).unwrap(),
-                        None => "(no subject)".into(),
-                    };
-                    println!("    Subject: {}", subject);
+                match item {
+                    MessageDataItem::Envelope(env) => {
+                        let subject = match &env.subject.0 {
+                            Some(s) => decoder.clone().decode(s).unwrap_or_else(|_| "(decode error)".into()),
+                            None => "(no subject)".into(),
+                        };
+
+                        let (from_addr, from_name) = if !env.from.is_empty() {
+                            let first = &env.from[0];
+                            let mailbox = first.mailbox.0.as_ref().map(|b| String::from_utf8_lossy(b.as_ref())).unwrap_or_default();
+                            let host = first.host.0.as_ref().map(|h| String::from_utf8_lossy(h.as_ref())).unwrap_or_default();
+                            let addr = format!("{}@{}", mailbox, host);
+                            let name = first.name.0.as_ref()
+                                .and_then(|n| decoder.clone().decode(n.as_ref()).ok());
+                            (addr, name)
+                        } else {
+                            ("unknown".to_string(), None)
+                        };
+
+                        let date = env.date.0.as_ref()
+                            .map(|d| String::from_utf8_lossy(d.as_ref()).to_string())
+                            .unwrap_or_else(|| "1970-01-01 00:00:00".to_string());
+
+                        envelope_data = Some((from_addr, from_name, subject, date));
+                        println!("    Subject: {}", envelope_data.as_ref().unwrap().2);
+                    }
+                    MessageDataItem::Flags(flags) => {
+                        flags_data = flags.iter().map(|f| match f {
+                            FlagFetch::Flag(flag) => format!("{}", flag),
+                            FlagFetch::Recent => "\\Recent".to_string(),
+                        }).collect();
+                    }
+                    _ => {}
                 }
+            }
+
+            if let Some((from_addr, from_name, subject, date)) = envelope_data {
+                let msg = NewMessage {
+                    uid: uid.get(),
+                    from_addr,
+                    from_name,
+                    subject,
+                    date,
+                    flags: flags_data,
+                };
+
+                new_messages.push(msg);
             }
         }
 
-        println!();
-        Ok((new_uids, new_count))
+        Ok(new_messages)
     }
 
     fn fetch_flag_updates(
@@ -159,15 +306,12 @@ impl<'a> Syncer<'a> {
         use_condstore: bool,
         cached_highestmodseq: u64,
         current_highestmodseq: u64,
-    ) -> Result<(HashSet<NonZeroU32>, usize), Box<dyn std::error::Error>> {
-        // Step 2: Check flag changes to old messages
-        // With CONDSTORE: Use CHANGEDSINCE to only fetch changed messages
-        // Without CONDSTORE: Fetch all old messages before last seen UID, then check if flags changed
+    ) -> Result<Vec<FlagUpdate>, Box<dyn std::error::Error>> {
         if use_condstore {
             if current_highestmodseq == cached_highestmodseq {
                 println!("Step 2: HIGHESTMODSEQ unchanged ({}), skipping flag check", current_highestmodseq);
                 println!("  (All cached messages are still valid)\n");
-                Ok((HashSet::new(), 0))
+                return Ok(Vec::new());
             } else {
                 self.fetch_flag_updates_changedsince(folder, cached_highestmodseq)
             }
@@ -181,7 +325,7 @@ impl<'a> Syncer<'a> {
         &mut self,
         folder: &str,
         cached_highestmodseq: u64,
-    ) -> Result<(HashSet<NonZeroU32>, usize), Box<dyn std::error::Error>> {
+    ) -> Result<Vec<FlagUpdate>, Box<dyn std::error::Error>> {
         println!("Step 2: Using CONDSTORE CHANGEDSINCE to fetch changes since MODSEQ {}", cached_highestmodseq);
 
         let sequence_set = SequenceSet::try_from("1:*")?;
@@ -189,21 +333,17 @@ impl<'a> Syncer<'a> {
             vec![io_imap::types::fetch::MessageDataItemName::Flags].try_into()?
         );
 
-        let flag_updates = self.client.fetch_with_changedsince(sequence_set, fetch_items, cached_highestmodseq)?;
-        println!("  Found {} messages with flag changes", flag_updates.len());
+        let fetched = self.client.fetch_with_changedsince(sequence_set, fetch_items, cached_highestmodseq)?;
+        println!("  Found {} messages with flag changes", fetched.len());
 
-        let mut updated_uids = HashSet::new();
-        let mut updated_count = 0;
+        let mut updates = Vec::new();
 
-        for (_seq, items) in flag_updates {
-            let uid = Self::get_uid(items).unwrap();
-            updated_uids.insert(uid);
-            updated_count += 1;
+        for (_seq, items) in fetched {
+            updates.push(FlagUpdate::new(items));
         }
 
-        // TODO update cache
-
-        Ok((updated_uids, updated_count))
+        println!("  Updated {} messages in cache\n", updates.len());
+        Ok(updates)
     }
 
     /// No CONDSTORE: Fetch all old messages
@@ -211,56 +351,49 @@ impl<'a> Syncer<'a> {
         &mut self,
         folder: &str,
         last_seen_uid: u32,
-    ) -> Result<(HashSet<NonZeroU32>, usize), Box<dyn std::error::Error>> {
+    ) -> Result<Vec<FlagUpdate>, Box<dyn std::error::Error>> {
         println!("Step 2: Fetching flags for existing messages (UIDs 1:{})", last_seen_uid);
+
+        if last_seen_uid == 0 {
+            println!("  No existing messages to check\n");
+            return Ok(Vec::new());
+        }
 
         let sequence_set = SequenceSet::try_from(format!("1:{}", last_seen_uid).as_str())?;
         let fetch_items = MacroOrMessageDataItemNames::MessageDataItemNames(
             vec![io_imap::types::fetch::MessageDataItemName::Flags].try_into()?
         );
 
-        let flag_updates = self.client.fetch(sequence_set, fetch_items, true)?;
-        println!("  Checking flags for {} messages", flag_updates.len());
+        let fetched = self.client.fetch(sequence_set, fetch_items, true)?;
+        println!("  Checking flags for {} messages", fetched.len());
 
-        let mut updated_uids = HashSet::new();
-        let mut updated_count = 0;
+        let mut updates = Vec::new();
 
-        for (_seq, items) in flag_updates {
-            let uid = Self::get_uid(items.clone()).unwrap();
-            for item in items.as_ref() {
-                if let MessageDataItem::Flags(flags) = item {
-                    if let Some(cached_msg) = self.cache.get_message(uid.get(), folder)? {
-                        let cached_flags = cached_msg.get_flags_as_list();
-                        let server_flags: Vec<String> = flags
-                            .iter()
-                            .map(|flag| match flag {
-                                FlagFetch::Flag(f) => format!("{}", f),
-                                FlagFetch::Recent => "\\Recent".to_string(),
-                            })
-                            .collect();
+        for (_seq, items) in fetched {
+            let flag_update = FlagUpdate::new(items);
+            let FlagUpdate { uid, flags: server_flags } = flag_update.clone();
 
-                        if cached_flags != server_flags {
-                            updated_count += 1;
-                            println!(
-                                "  UID {} flags changed: {:?} -> {:?}",
-                                uid, cached_flags, server_flags
-                            );
-                            // TODO update cache
-                        }
-                    }
+            if let Some(cached_msg) = self.cache.get_message(uid, folder)? {
+                let cached_flags = cached_msg.get_flags_as_list();
+                if cached_flags != server_flags {
+                    println!(
+                        "  UID {} flags changed: {:?} -> {:?}",
+                        uid, cached_flags, server_flags
+                    );
+
+                    updates.push(flag_update);
                 }
             }
-            updated_uids.insert(uid);
-            updated_count += 1;
         }
 
-        println!("  Total flag changes detected: {}\n", updated_count);
-
-        Ok((updated_uids, updated_count))
+        Ok(updates)
     }
 
-    fn get_server_uids(&mut self) -> Result<HashSet<NonZeroU32>, Box<dyn std::error::Error>> {
-        let criteria = vec![io_imap::types::search::SearchKey::All].try_into()?;
+    fn get_server_uids(&mut self, start_uid: u32, end_uid: u32) -> Result<HashSet<NonZeroU32>, Box<dyn std::error::Error>> {
+        use io_imap::types::search::SearchKey;
+        // let criteria = vec![SearchKey::All].try_into()?;
+        let sequence_set = SequenceSet::try_from(format!("{}:{}", start_uid, end_uid).as_str())?;
+        let criteria = vec![SearchKey::SequenceSet(sequence_set)].try_into()?;
         let uids = self.client.search_uid(criteria)?;
         Ok(HashSet::from_iter(uids.into_iter()))
     }
@@ -269,25 +402,21 @@ impl<'a> Syncer<'a> {
         &self,
         folder: &str,
         server_uids: &HashSet<NonZeroU32>,
-    ) -> Result<(HashSet<NonZeroU32>, usize), Box<dyn std::error::Error>> {
+    ) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
         println!("Step 3: Detecting expunged messages");
 
-        let mut expunged_uids = HashSet::new();
-        let mut expunged_count = 0;
-
         let cached_uids = self.cache.get_all_uids(folder)?;
-        let cached_uids = HashSet::from_iter(cached_uids.into_iter());
-        let diff: Vec<_> = cached_uids.difference(&server_uids).collect();
+        let cached_uids_set: HashSet<NonZeroU32> = cached_uids.into_iter().collect();
 
-        for &uid in diff {
-            expunged_uids.insert(uid);
-            expunged_count += 1;
+        let expunged: Vec<u32> = cached_uids_set
+            .difference(server_uids)
+            .map(|uid| uid.get())
+            .collect();
+
+        for uid in &expunged {
             println!("  Expunged UID {} (deleted on server)", uid);
-            // TODO delete from cache
         }
 
-        println!("  Expunged messages: {}", expunged_count);
-
-        Ok((expunged_uids, expunged_count))
+        Ok(expunged)
     }
 }

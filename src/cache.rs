@@ -1,7 +1,6 @@
 use rusqlite::{Connection, Result, params, OptionalExtension};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
-use std::collections::HashSet;
 
 #[derive(Debug)]
 pub struct CachedMessage {
@@ -134,6 +133,9 @@ impl EmailCache {
         Ok(())
     }
 
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Folder state operations
+    // ──────────────────────────────────────────────────────────────────────────────
     pub fn get_folder_state(&self, folder: &str) -> Result<Option<CachedFolderState>> {
         let mut stmt = self.conn.prepare(
             "SELECT uidvalidity, highestmodseq FROM folder_state WHERE folder = ?"
@@ -151,21 +153,6 @@ impl EmailCache {
         }
     }
 
-    pub fn get_message(&self, uid: u32, folder: &str) -> Result<Option<CachedMessage>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT uid, folder, from_addr, from_name, subject, date, flags 
-             FROM messages WHERE uid = ? AND folder = ?"
-        )?;
-
-        let mut rows = stmt.query(params![uid, folder])?;
-
-        if let Some(row) = rows.next()? {
-            Ok(Some(CachedMessage::from_row(row)?))
-        } else {
-            Ok(None)
-        }
-    }
-
     pub fn set_folder_state(&self, folder: &str, uidvalidity: u32, highestmodseq: u64) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO folder_state (folder, uidvalidity, highestmodseq) VALUES (?, ?, ?)",
@@ -176,7 +163,7 @@ impl EmailCache {
 
     pub fn get_last_seen_uid(&self, folder: &str) -> Result<Option<u32>> {
         let mut stmt = self.conn.prepare("SELECT MAX(uid) FROM messages WHERE folder = ?")?;
-        let result: Option<u32> = stmt.query_row(params![folder], |row| row.get(0)).optional()?;
+        let result: Option<u32> = stmt.query_row(params![folder], |row| row.get(0))?;
         Ok(result)
     }
 
@@ -184,6 +171,37 @@ impl EmailCache {
         let mut stmt = self.conn.prepare_cached("SELECT uid FROM messages WHERE folder = ?")?;
         let rows = stmt.query_map(params![folder], |row| row.get(0))?;
         rows.collect()
+    }
+
+    pub fn clear_folder_messages_for_uidvalidity_change(&self, folder: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM folder_state WHERE folder = ?", params![folder])?;
+        self.conn.execute("DELETE FROM messages WHERE folder = ?", params![folder])?;
+        Ok(())
+    }
+
+    pub fn clear_folders_state_for_cache_cleanup(&self, folders: &[String]) -> Result<()> {
+        let placeholders = vec!["?"; folders.len()].join(", ");
+        let query = format!("DELETE FROM folder_state WHERE folder IN ({})", placeholders);
+        self.conn.execute(&query, rusqlite::params_from_iter(folders))?;
+        Ok(())
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Message operations
+    // ──────────────────────────────────────────────────────────────────────────────
+    pub fn get_message(&self, uid: u32, folder: &str) -> Result<Option<CachedMessage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT uid, folder, from_addr, from_name, subject, date, flags
+             FROM messages WHERE uid = ? AND folder = ?"
+        )?;
+
+        let mut rows = stmt.query(params![uid, folder])?;
+
+        if let Some(row) = rows.next()? {
+            Ok(Some(CachedMessage::from_row(row)?))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn insert_message(
@@ -213,7 +231,7 @@ impl EmailCache {
         Ok(())
     }
 
-    pub fn update_flags(&self, uid: u32, folder: &str, flags: &[String]) -> Result<()> {
+    pub fn update_message_flags(&self, uid: u32, folder: &str, flags: &[String]) -> Result<()> {
         let flags_str = normalize_flags_serialize(flags);
         self.conn.execute(
             "UPDATE messages SET flags = ? WHERE uid = ? AND folder = ?",
@@ -222,14 +240,111 @@ impl EmailCache {
         Ok(())
     }
 
+    pub fn copy_message(&self, source_uid: u32, source_folder: &str, dest_uid: u32, dest_folder: &str) -> Result<()> {
+        // Copy message data
+        self.conn.execute(
+            "INSERT OR REPLACE INTO messages
+             (uid, folder, from_addr, from_name, subject, date, body_preview, full_body, flags)
+             SELECT ?, ?, from_addr, from_name, subject, date, body_preview, full_body, flags
+             FROM messages WHERE uid = ? AND folder = ?",
+            params![dest_uid, dest_folder, source_uid, source_folder],
+        )?;
+
+        // Copy tags
+        self.conn.execute(
+            "INSERT OR IGNORE INTO tags (uid, folder, tag)
+             SELECT ?, ?, tag FROM tags WHERE uid = ? AND folder = ?",
+            params![dest_uid, dest_folder, source_uid, source_folder],
+        )?;
+
+        // Copy Gmail labels
+        self.conn.execute(
+            "INSERT OR IGNORE INTO gm_labels (uid, folder, label)
+             SELECT ?, ?, label FROM gm_labels WHERE uid = ? AND folder = ?",
+            params![dest_uid, dest_folder, source_uid, source_folder],
+        )?;
+
+        Ok(())
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Tag operations
+    // ──────────────────────────────────────────────────────────────────────────────
+    pub fn get_tags(&self, uid: u32, folder: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT tag FROM tags WHERE uid = ? AND folder = ? ORDER BY tag"
+        )?;
+        let rows = stmt.query_map(params![uid, folder], |row| row.get(0))?;
+        rows.collect()
+    }
+
+    pub fn add_tag(&self, uid: u32, folder: &str, tag: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO tags (uid, folder, tag) VALUES (?, ?, ?)",
+            params![uid, folder, tag],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_tag(&self, uid: u32, folder: &str, tag: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM tags WHERE uid = ? AND folder = ? AND tag = ?",
+            params![uid, folder, tag],
+        )?;
+        Ok(())
+    }
+
+    pub fn tag_messages(&self, messages: &[CachedMessage], tags_to_add: &[String], tags_to_remove: &[String]) -> Result<usize> {
+        for msg in messages {
+            for tag in tags_to_add {
+                self.add_tag(msg.uid, &msg.folder, tag)?;
+            }
+            for tag in tags_to_remove {
+                self.remove_tag(msg.uid, &msg.folder, tag)?;
+            }
+        }
+        Ok(messages.len())
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Gmail label operations
+    // ──────────────────────────────────────────────────────────────────────────────
+    pub fn get_gm_labels(&self, uid: u32, folder: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT label FROM gm_labels WHERE uid = ? AND folder = ? ORDER BY label"
+        )?;
+        let rows = stmt.query_map(params![uid, folder], |row| row.get(0))?;
+        rows.collect()
+    }
+
+    pub fn set_gm_labels(&self, uid: u32, folder: &str, labels: &[String]) -> Result<()> {
+        // Clear existing labels
+        self.conn.execute(
+            "DELETE FROM gm_labels WHERE uid = ? AND folder = ?",
+            params![uid, folder],
+        )?;
+
+        // Insert new labels
+        for label in labels {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO gm_labels (uid, folder, label) VALUES (?, ?, ?)",
+                params![uid, folder, label],
+            )?;
+        }
+        Ok(())
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Search
+    // ──────────────────────────────────────────────────────────────────────────────
     pub fn search(&self, folder: &str, query: &str) -> Result<Vec<CachedMessage>> {
         // Simple search implementation - just search in subject and from_addr
         // For now, we'll do a basic LIKE search. Full query parsing can be added later.
         let search_pattern = format!("%{}%", query);
 
         let mut stmt = self.conn.prepare(
-            "SELECT uid, folder, from_addr, from_name, subject, date, flags 
-             FROM messages 
+            "SELECT uid, folder, from_addr, from_name, subject, date, flags
+             FROM messages
              WHERE folder = ? AND (subject LIKE ? OR from_addr LIKE ?)
              ORDER BY date DESC"
         )?;

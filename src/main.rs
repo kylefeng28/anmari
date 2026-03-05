@@ -30,6 +30,14 @@ enum Commands {
         /// Page size for fetching
         #[arg(long, default_value = "100")]
         page_size: usize,
+
+        /// Fallback sync (regardless of whether CONDSTORE is enabled or not)
+        #[arg(long)]
+        fallback: bool,
+
+        /// Dry run (if turned on, do not update cache)
+        #[arg(long)]
+        dry_run: bool
     },
 
     /// Search emails in local cache
@@ -221,14 +229,14 @@ fn main() {
     client.print_status_debug();
 
     match cli.command {
-        Commands::Sync { folder, all_folders, page_size } => {
+        Commands::Sync { folder, all_folders, page_size, fallback, dry_run } => {
             info!("Sync: folder={:?}, all_folders={}, page_size={}", 
                      folder, all_folders, page_size);
 
             let folder_to_sync = folder.as_deref().unwrap_or("INBOX");
             let mut syncer = sync::Syncer::new(&mut client, &cache);
 
-            match syncer.sync_folder(folder_to_sync) {
+            match syncer.sync_folder(folder_to_sync, fallback, dry_run) {
                 Ok(_) => info!("Sync completed successfully"),
                 Err(e) => eprintln!("Sync error: {}", e),
             }
