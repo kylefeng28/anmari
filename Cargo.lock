@@ -39,6 +39,7 @@ dependencies = [
  "clap",
  "dirs",
  "env_logger",
+ "imap-codec",
  "io-imap",
  "io-stream",
  "log",

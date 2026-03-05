@@ -1,5 +1,7 @@
 use rusqlite::{Connection, Result, params, OptionalExtension};
+use std::num::NonZeroU32;
 use std::path::PathBuf;
+use std::collections::HashSet;
 
 #[derive(Debug)]
 pub struct CachedMessage {
@@ -176,6 +178,12 @@ impl EmailCache {
         let mut stmt = self.conn.prepare("SELECT MAX(uid) FROM messages WHERE folder = ?")?;
         let result: Option<u32> = stmt.query_row(params![folder], |row| row.get(0)).optional()?;
         Ok(result)
+    }
+
+    pub fn get_all_uids(&self, folder: &str) -> Result<Vec<NonZeroU32>> {
+        let mut stmt = self.conn.prepare_cached("SELECT uid FROM messages WHERE folder = ?")?;
+        let rows = stmt.query_map(params![folder], |row| row.get(0))?;
+        rows.collect()
     }
 
     pub fn insert_message(
