@@ -3,6 +3,7 @@ use log::{info};
 use env_logger;
 
 mod config;
+mod imap;
 
 #[derive(Parser)]
 #[command(name = "anmari")]
@@ -160,6 +161,17 @@ fn main() {
     };
 
     info!("Using account: {}", account.email);
+
+    // Connect to IMAP
+    let client = match imap::ImapClient::connect(account) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error connecting to IMAP: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    client.print_status_debug();
 
     match cli.command {
         Commands::Sync { folder, all_folders, page_size } => {
