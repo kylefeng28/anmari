@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Result};
+use rusqlite::{Connection, Result, params, OptionalExtension};
 use std::path::PathBuf;
 
 #[derive(Debug)]
@@ -12,6 +12,28 @@ pub struct CachedMessage {
     pub flags: String,
 }
 
+impl CachedMessage {
+    pub fn get_flags_as_list(&self) -> Vec<String> {
+        if self.flags.is_empty() {
+            Vec::new()
+        } else {
+            self.flags.split(' ').map(|s| s.to_string()).collect()
+        }
+    }
+
+    fn from_row(row: &rusqlite::Row) -> Result<Self> {
+        Ok(CachedMessage {
+            uid: row.get(0)?,
+            folder: row.get(1)?,
+            from_addr: row.get(2)?,
+            from_name: row.get(3)?,
+            subject: row.get(4)?,
+            date: row.get(5)?,
+            flags: row.get(6)?,
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct CachedFolderState {
     pub uidvalidity: u32,
@@ -20,6 +42,19 @@ pub struct CachedFolderState {
 
 pub struct EmailCache {
     conn: Connection,
+}
+
+fn normalize_flags_serialize(flags: &[String]) -> String {
+    let mut sorted = flags.to_vec();
+    sorted.sort();
+    sorted.join(" ")
+}
+
+fn get_db_path(account_index: usize) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let state_dir = dirs::state_dir()
+        .ok_or("Could not find state directory")?;
+
+    Ok(state_dir.join("anmari").join(format!("anmari_{}.db", account_index)))
 }
 
 impl EmailCache {
@@ -120,28 +155,82 @@ impl EmailCache {
              FROM messages WHERE uid = ? AND folder = ?"
         )?;
 
-        let mut rows = stmt.query(rusqlite::params![uid, folder])?;
+        let mut rows = stmt.query(params![uid, folder])?;
 
         if let Some(row) = rows.next()? {
-            Ok(Some(CachedMessage {
-                uid: row.get(0)?,
-                folder: row.get(1)?,
-                from_addr: row.get(2)?,
-                from_name: row.get(3)?,
-                subject: row.get(4)?,
-                date: row.get(5)?,
-                flags: row.get(6)?,
-            }))
+            Ok(Some(CachedMessage::from_row(row)?))
         } else {
             Ok(None)
         }
     }
 
-}
+    pub fn set_folder_state(&self, folder: &str, uidvalidity: u32, highestmodseq: u64) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO folder_state (folder, uidvalidity, highestmodseq) VALUES (?, ?, ?)",
+            params![folder, uidvalidity, highestmodseq],
+        )?;
+        Ok(())
+    }
 
-fn get_db_path(account_index: usize) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let state_dir = dirs::state_dir()
-        .ok_or("Could not find state directory")?;
+    pub fn get_last_seen_uid(&self, folder: &str) -> Result<Option<u32>> {
+        let mut stmt = self.conn.prepare("SELECT MAX(uid) FROM messages WHERE folder = ?")?;
+        let result: Option<u32> = stmt.query_row(params![folder], |row| row.get(0)).optional()?;
+        Ok(result)
+    }
 
-    Ok(state_dir.join("anmari").join(format!("anmari_{}.db", account_index)))
+    pub fn insert_message(
+        &self,
+        uid: u32,
+        folder: &str,
+        from_addr: &str,
+        from_name: Option<&str>,
+        subject: &str,
+        date: &str,
+        flags: &[String],
+    ) -> Result<()> {
+        let flags_str = normalize_flags_serialize(flags);
+        self.conn.execute(
+            "INSERT OR REPLACE INTO messages (uid, folder, from_addr, from_name, subject, date, flags, body_preview, full_body)
+             VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)",
+            params![uid, folder, from_addr, from_name, subject, date, flags_str],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_message(&self, uid: u32, folder: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM messages WHERE uid = ? AND folder = ?",
+            params![uid, folder],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_flags(&self, uid: u32, folder: &str, flags: &[String]) -> Result<()> {
+        let flags_str = normalize_flags_serialize(flags);
+        self.conn.execute(
+            "UPDATE messages SET flags = ? WHERE uid = ? AND folder = ?",
+            params![flags_str, uid, folder],
+        )?;
+        Ok(())
+    }
+
+    pub fn search(&self, folder: &str, query: &str) -> Result<Vec<CachedMessage>> {
+        // Simple search implementation - just search in subject and from_addr
+        // For now, we'll do a basic LIKE search. Full query parsing can be added later.
+        let search_pattern = format!("%{}%", query);
+
+        let mut stmt = self.conn.prepare(
+            "SELECT uid, folder, from_addr, from_name, subject, date, flags 
+             FROM messages 
+             WHERE folder = ? AND (subject LIKE ? OR from_addr LIKE ?)
+             ORDER BY date DESC"
+        )?;
+
+        let rows = stmt.query_map(
+            params![folder, search_pattern, search_pattern],
+            CachedMessage::from_row,
+        )?;
+
+        rows.collect()
+    }
 }
