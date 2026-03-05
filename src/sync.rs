@@ -23,6 +23,66 @@ struct NewMessage {
     flags: Vec<String>,
 }
 
+impl NewMessage {
+    pub fn new(items: Vec1<MessageDataItem>) -> NewMessage {
+        // Decode MIME encoded words (RFC 2047)
+        use rfc2047_decoder::{Decoder, RecoverStrategy};
+        let decoder = Decoder::new()
+            .too_long_encoded_word_strategy(RecoverStrategy::Skip);
+
+        let mut uid = None;
+        let mut envelope_data = None;
+        let mut flags = Vec::new();
+
+        for item in items.as_ref() {
+            match item {
+                MessageDataItem::Uid(_uid) => {
+                    uid = Some(*_uid);
+                }
+                MessageDataItem::Envelope(env) => {
+                    let subject = match &env.subject.0 {
+                        Some(s) => decoder.clone().decode(s).unwrap_or_else(|_| "(decode error)".into()),
+                        None => "(no subject)".into(),
+                    };
+
+                    let (from_addr, from_name) = if !env.from.is_empty() {
+                        let first = &env.from[0];
+                        let mailbox = first.mailbox.0.as_ref().map(|b| String::from_utf8_lossy(b.as_ref())).unwrap_or_default();
+                        let host = first.host.0.as_ref().map(|h| String::from_utf8_lossy(h.as_ref())).unwrap_or_default();
+                        let addr = format!("{}@{}", mailbox, host);
+                        let name = first.name.0.as_ref()
+                            .and_then(|n| decoder.clone().decode(n.as_ref()).ok());
+                        (addr, name)
+                    } else {
+                        ("unknown".to_string(), None)
+                    };
+
+                    let date = env.date.0.as_ref()
+                        .map(|d| String::from_utf8_lossy(d.as_ref()).to_string())
+                        .unwrap_or_else(|| "1970-01-01 00:00:00".to_string());
+
+                    envelope_data = Some((from_addr, from_name, subject, date));
+                    println!("    Subject: {}", envelope_data.as_ref().unwrap().2);
+                }
+                MessageDataItem::Flags(_flags) => {
+                    flags = get_flags(_flags);
+                }
+                _ => {}
+            }
+        }
+
+        let (from_addr, from_name, subject, date) = envelope_data.unwrap();
+        NewMessage {
+            uid: uid.unwrap().get(),
+            from_addr,
+            from_name,
+            subject,
+            date,
+            flags,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct FlagUpdate {
     uid: u32,
@@ -206,15 +266,6 @@ impl<'a> Syncer<'a> {
         Ok((total_new, total_updated, total_expunged))
     }
 
-    fn get_uid(items: Vec1<MessageDataItem>) -> Option<NonZeroU32> {
-        for item in items {
-            if let MessageDataItem::Uid(uid) = item {
-                return Some(uid)
-            }
-        }
-        None
-    }
-
     fn fetch_new_messages(
         &mut self,
         folder: &str,
@@ -224,78 +275,20 @@ impl<'a> Syncer<'a> {
 
         let start_uid = last_seen_uid + 1;
         let sequence_set = SequenceSet::try_from(format!("{}:*", start_uid).as_str())?;
+
+        let mut new_messages = Vec::new();
+
         let fetch_items = MacroOrMessageDataItemNames::Macro(
             io_imap::types::fetch::Macro::All,
         );
 
         let fetched = self.client.fetch(sequence_set, fetch_items, true)?;
-        println!("  Found {} new messages", fetched.len());
 
-        // Decode MIME encoded words (RFC 2047)
-        use rfc2047_decoder::{Decoder, RecoverStrategy};
-        let decoder = Decoder::new()
-            .too_long_encoded_word_strategy(RecoverStrategy::Skip);
-
-        let mut new_messages = Vec::new();
-
-        for (seq, items) in fetched {
-            let uid = Self::get_uid(items.clone()).unwrap();
-            println!("  New message {}: UID {}", seq, uid);
-
-            let mut envelope_data = None;
-            let mut flags_data = Vec::new();
-
-            for item in items.as_ref() {
-                match item {
-                    MessageDataItem::Envelope(env) => {
-                        let subject = match &env.subject.0 {
-                            Some(s) => decoder.clone().decode(s).unwrap_or_else(|_| "(decode error)".into()),
-                            None => "(no subject)".into(),
-                        };
-
-                        let (from_addr, from_name) = if !env.from.is_empty() {
-                            let first = &env.from[0];
-                            let mailbox = first.mailbox.0.as_ref().map(|b| String::from_utf8_lossy(b.as_ref())).unwrap_or_default();
-                            let host = first.host.0.as_ref().map(|h| String::from_utf8_lossy(h.as_ref())).unwrap_or_default();
-                            let addr = format!("{}@{}", mailbox, host);
-                            let name = first.name.0.as_ref()
-                                .and_then(|n| decoder.clone().decode(n.as_ref()).ok());
-                            (addr, name)
-                        } else {
-                            ("unknown".to_string(), None)
-                        };
-
-                        let date = env.date.0.as_ref()
-                            .map(|d| String::from_utf8_lossy(d.as_ref()).to_string())
-                            .unwrap_or_else(|| "1970-01-01 00:00:00".to_string());
-
-                        envelope_data = Some((from_addr, from_name, subject, date));
-                        println!("    Subject: {}", envelope_data.as_ref().unwrap().2);
-                    }
-                    MessageDataItem::Flags(flags) => {
-                        flags_data = flags.iter().map(|f| match f {
-                            FlagFetch::Flag(flag) => format!("{}", flag),
-                            FlagFetch::Recent => "\\Recent".to_string(),
-                        }).collect();
-                    }
-                    _ => {}
-                }
-            }
-
-            if let Some((from_addr, from_name, subject, date)) = envelope_data {
-                let msg = NewMessage {
-                    uid: uid.get(),
-                    from_addr,
-                    from_name,
-                    subject,
-                    date,
-                    flags: flags_data,
-                };
-
-                new_messages.push(msg);
-            }
+        for (_seq, items) in fetched {
+            new_messages.push(NewMessage::new(items));
         }
 
+        println!("  Fetched {} new messages\n", new_messages.len());
         Ok(new_messages)
     }
 
