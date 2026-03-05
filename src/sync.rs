@@ -127,7 +127,13 @@ impl<'a> Syncer<'a> {
         Self { client, cache }
     }
 
-    pub fn sync_folder(&mut self, folder: &str, use_fallback: bool, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn sync_folder(
+        &mut self,
+        folder: &str,
+        use_fallback: bool,
+        page_size: usize,
+        dry_run: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         println!("=== Syncing folder: {} ===\n", folder);
 
         // Select the folder
@@ -164,23 +170,34 @@ impl<'a> Syncer<'a> {
             use_condstore = false;
         }
 
-        let (total_new, total_updated, total_expunged) = self.sync(folder, last_seen_uid, use_condstore, cached_highestmodseq, highestmodseq, dry_run)?;
+        let (total_new, total_updated, total_expunged) = self.sync_messages(
+            folder,
+            last_seen_uid,
+            use_condstore,
+            cached_highestmodseq,
+            highestmodseq,
+            page_size,
+            dry_run,
+        )?;
 
-        // Update folder state
-        // TODO update uidvalidity, highestmodseq
+        // Update cached folder state
+        if !dry_run {
+            self.cache.set_folder_state(folder, uidvalidity, highestmodseq)?;
+        }
 
         println!("\n=== Sync complete: New: {}, Updated: {}, Expunged: {} ===", 
                  total_new, total_updated, total_expunged);
         Ok(())
     }
 
-    fn sync(
+    fn sync_messages(
         &mut self,
         folder: &str,
         last_seen_uid: Option<u32>,
         use_condstore: bool,
         cached_highestmodseq: u64,
         current_highestmodseq: u64,
+        page_size: usize,
         dry_run: bool,
     ) -> Result<(usize, usize, usize), Box<dyn std::error::Error>> {
 
@@ -192,7 +209,7 @@ impl<'a> Syncer<'a> {
         let last_seen_uid = last_seen_uid.unwrap_or(1);
 
         // Step 1: Fetch new messages
-        let new_messages = self.fetch_new_messages(folder, last_seen_uid)?;
+        let new_messages = self.fetch_new_messages(folder, last_seen_uid, page_size)?;
         let total_new = new_messages.len();
 
         // Step 2: Fetch flag changes to old messages
@@ -270,22 +287,47 @@ impl<'a> Syncer<'a> {
         &mut self,
         folder: &str,
         last_seen_uid: u32,
+        page_size: usize,
     ) -> Result<Vec<NewMessage>, Box<dyn std::error::Error>> {
         println!("Step 1: Fetching new messages since last sync (UID {})", last_seen_uid);
 
         let start_uid = last_seen_uid + 1;
         let sequence_set = SequenceSet::try_from(format!("{}:*", start_uid).as_str())?;
 
+        // Get all new UIDs
+        use io_imap::types::search::SearchKey;
+        let criteria = vec![SearchKey::Uid(sequence_set)].try_into()?;
+        let new_uids = self.client.search_uid(criteria)?;
+
+        if new_uids.is_empty() {
+            println!("  No new messages\n");
+            return Ok(Vec::new());
+        }
+
         let mut new_messages = Vec::new();
 
-        let fetch_items = MacroOrMessageDataItemNames::Macro(
-            io_imap::types::fetch::Macro::All,
-        );
+        for (page_num, chunk) in new_uids.chunks(page_size).enumerate() {
+            println!("  Fetching page {} ({} messages)", page_num, chunk.len());
 
-        let fetched = self.client.fetch(sequence_set, fetch_items, true)?;
+            let mut page_new_messages = Vec::new();
 
-        for (_seq, items) in fetched {
-            new_messages.push(NewMessage::new(items));
+            let sequence_set = SequenceSet::try_from(
+                chunk.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(",").as_str()
+            )?;
+
+            let fetch_items = MacroOrMessageDataItemNames::Macro(
+                io_imap::types::fetch::Macro::All,
+            );
+
+            let fetched = self.client.fetch(sequence_set, fetch_items, true)?;
+
+            for (_seq, items) in fetched {
+                page_new_messages.push(NewMessage::new(items));
+            }
+
+            println!("  Page {}: Fetched {} new messages\n", page_num, page_new_messages.len());
+
+            new_messages.append(&mut page_new_messages);
         }
 
         println!("  Fetched {} new messages\n", new_messages.len());
