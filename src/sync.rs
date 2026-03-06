@@ -208,9 +208,39 @@ impl<'a> Syncer<'a> {
 
         let last_seen_uid = last_seen_uid.unwrap_or(1);
 
+        let prefix = if dry_run {
+            println!("[DRY RUN - not updating cache]");
+            "[DRY RUN] "
+        } else {
+            ""
+        };
+
         // Step 1: Fetch new messages
-        let new_messages = self.fetch_new_messages(folder, last_seen_uid, page_size)?;
-        let total_new = new_messages.len();
+        let mut total_new = 0;
+        let cache = self.cache;
+        for page_result in self.fetch_new_messages_page(folder, last_seen_uid, page_size) {
+            let new_messages_page = page_result?;
+            total_new += new_messages_page.len();
+
+            // Update cache
+            let mut total_new_cache = 0;
+            for msg in new_messages_page {
+                if !dry_run {
+                    cache.insert_message(
+                        msg.uid,
+                        folder,
+                        &msg.from_addr,
+                        msg.from_name.as_deref(),
+                        &msg.subject,
+                        &msg.date,
+                        &msg.flags,
+                    )?;
+                }
+                total_new_cache += 1;
+            }
+            println!("{}Added {} messages to cache", prefix, total_new_cache);
+        }
+        println!("  Fetched {} new messages\n", total_new);
 
         // Step 2: Fetch flag changes to old messages
         let flag_updates = self.fetch_flag_updates(
@@ -227,31 +257,6 @@ impl<'a> Syncer<'a> {
         let total_expunged = expunged_uids.len();
 
         println!();
-
-        // Update cache
-        let prefix = if dry_run {
-            println!("[DRY RUN - not updating cache]");
-            "[DRY RUN] "
-        } else {
-            ""
-        };
-
-        let mut total_new_cache = 0;
-        for msg in new_messages {
-            if !dry_run {
-                self.cache.insert_message(
-                    msg.uid,
-                    folder,
-                    &msg.from_addr,
-                    msg.from_name.as_deref(),
-                    &msg.subject,
-                    &msg.date,
-                    &msg.flags,
-                )?;
-            }
-            total_new_cache += 1;
-        }
-        println!("{}Added {} messages to cache", prefix, total_new_cache);
 
         let mut total_updated_cache = 0;
         for flag_update in flag_updates {
@@ -283,55 +288,72 @@ impl<'a> Syncer<'a> {
         Ok((total_new, total_updated, total_expunged))
     }
 
-    fn fetch_new_messages(
+    // Returns a lazy iterator of fetched pages
+    fn fetch_new_messages_page(
         &mut self,
         folder: &str,
         last_seen_uid: u32,
         page_size: usize,
-    ) -> Result<Vec<NewMessage>, Box<dyn std::error::Error>> {
+    ) -> Box<dyn Iterator<Item=Result<Vec<NewMessage>, Box<dyn std::error::Error>>> + '_> {
         println!("Step 1: Fetching new messages since last sync (UID {})", last_seen_uid);
 
         let start_uid = last_seen_uid + 1;
-        let sequence_set = SequenceSet::try_from(format!("{}:*", start_uid).as_str())?;
+        let sequence_set = match SequenceSet::try_from(format!("{}:*", start_uid).as_str()) {
+            Ok(s) => s,
+            Err(e) => return Box::new(std::iter::once(Err(e.into()))),
+        };
 
         // Get all new UIDs
         use io_imap::types::search::SearchKey;
-        let criteria = vec![SearchKey::Uid(sequence_set)].try_into()?;
-        let new_uids = self.client.search_uid(criteria)?;
+        let criteria = match vec![SearchKey::Uid(sequence_set)].try_into() {
+            Ok(c) => c,
+            Err(e) => return Box::new(std::iter::once(Err(Box::new(e) as Box<dyn std::error::Error>))),
+        };
+
+        let new_uids = match self.client.search_uid(criteria) {
+            Ok(uids) => uids,
+            Err(e) => return Box::new(std::iter::once(Err(e))),
+        };
 
         if new_uids.is_empty() {
             println!("  No new messages\n");
-            return Ok(Vec::new());
+            return Box::new(std::iter::empty());
         }
 
-        let mut new_messages = Vec::new();
+        println!("  Found {} new messages", new_uids.len());
 
-        for (page_num, chunk) in new_uids.chunks(page_size).enumerate() {
-            println!("  Fetching page {} ({} messages)", page_num, chunk.len());
+        // Convert chunks to owned Vec<Vec<NonZeroU32>> so we don't borrow new_uids
+        let uid_pages: Vec<Vec<_>> = new_uids
+            .chunks(page_size)
+            .map(|chunk| chunk.to_vec())
+            .collect();
 
-            let mut page_new_messages = Vec::new();
+        let pages_iter = uid_pages.into_iter()
+            .enumerate()
+            .map(move |(page_num, chunk)| {
+                println!("  Fetching page {} ({} messages)", page_num, chunk.len());
 
-            let sequence_set = SequenceSet::try_from(
-                chunk.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(",").as_str()
-            )?;
+                let sequence_set = SequenceSet::try_from(
+                    chunk.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(",").as_str()
+                )?;
 
-            let fetch_items = MacroOrMessageDataItemNames::Macro(
-                io_imap::types::fetch::Macro::All,
-            );
+                let fetch_items = MacroOrMessageDataItemNames::Macro(
+                    io_imap::types::fetch::Macro::All,
+                );
 
-            let fetched = self.client.fetch(sequence_set, fetch_items, true)?;
+                let fetched = self.client.fetch(sequence_set, fetch_items, true)?;
 
-            for (_seq, items) in fetched {
-                page_new_messages.push(NewMessage::new(items));
-            }
+                let mut new_messages_page = Vec::new();
+                for (_seq, items) in fetched {
+                    new_messages_page.push(NewMessage::new(items));
+                }
 
-            println!("  Page {}: Fetched {} new messages\n", page_num, page_new_messages.len());
+                println!("  Page {}: Fetched {} new messages", page_num, new_messages_page.len());
 
-            new_messages.append(&mut page_new_messages);
-        }
+                Ok(new_messages_page)
+            });
 
-        println!("  Fetched {} new messages\n", new_messages.len());
-        Ok(new_messages)
+        Box::new(pages_iter)
     }
 
     fn fetch_flag_updates(
