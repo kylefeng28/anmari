@@ -8,7 +8,8 @@ clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
 dirs = "5.0"
-io-imap = { path = "../pimalaya/io-imap", features = ["default"] }
+# io-imap = { git = "https://github.com/pimalaya/io-imap.git", branch = "io", default-features = false }
+io-imap = { path = "../pimalaya/io-imap" }
 imap-codec = { version = "2.0.0-alpha.7", features = ["ext_condstore_qresync"] }
 io-stream = { version = "0.0.2", default-features = false, features = ["std"] }
 rustls = "0.23"
@@ -18,3 +19,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 log = "0.4.29"
 env_logger = "0.11.9"
 rfc2047-decoder = "1.1.0"
+
+# [package.metadata.patch]
+# crates = ["io-imap"]
+# 
+# [patch.'https://github.com.pimalaya/io-imap.git']
+# io-imap = { path = "../pimalaya/io-imap" }

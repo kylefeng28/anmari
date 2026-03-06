@@ -53,7 +53,8 @@ fn normalize_flags_serialize(flags: &[String]) -> String {
 
 fn get_db_path(account_index: usize) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let state_dir = dirs::state_dir()
-        .ok_or("Could not find state directory")?;
+        .or(dirs::home_dir().map(|x| x.join(".local/state")));
+    let state_dir = state_dir.ok_or("Could not find state directory")?;
 
     Ok(state_dir.join("anmari").join(format!("anmari_{}.db", account_index)))
 }
@@ -131,6 +132,11 @@ impl EmailCache {
             "#,
         )?;
         Ok(())
+    }
+
+    /// IMPORTANT: make sure to call .commit() on the transaction object returned
+    pub fn transaction(&self) -> Result<Transaction<'_>> {
+        self.conn.unchecked_transaction()
     }
 
     // ──────────────────────────────────────────────────────────────────────────────
@@ -221,11 +227,6 @@ impl EmailCache {
             params![uid, folder, from_addr, from_name, subject, date, flags_str],
         )?;
         Ok(())
-    }
-
-    /// IMPORTANT: make sure to call .commit() on the transaction object returned
-    pub fn transaction(&self) -> Result<Transaction<'_>> {
-        self.conn.unchecked_transaction()
     }
 
     pub fn delete_message(&self, uid: u32, folder: &str) -> Result<()> {

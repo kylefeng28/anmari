@@ -141,7 +141,7 @@ impl<'a> Syncer<'a> {
         let select_data = self.client.select(mailbox)?;
 
         let uidvalidity = select_data.uid_validity.map(|u| u.get()).unwrap_or(0);
-        let highestmodseq = self.client.get_highestmodseq();
+        let highestmodseq = select_data.highest_mod_seq.map(|u| u.get()).unwrap_or(0);
 
         println!(
             "Selected folder - EXISTS: {:?}, UIDVALIDITY: {}, HIGHESTMODSEQ: {}\n",
@@ -348,7 +348,7 @@ impl<'a> Syncer<'a> {
                     io_imap::types::fetch::Macro::All,
                 );
 
-                let fetched = self.client.fetch(sequence_set, fetch_items, true)?;
+                let fetched = self.client.fetch(sequence_set, fetch_items)?;
 
                 let mut new_messages_page = Vec::new();
                 for (_seq, items) in fetched {
@@ -428,7 +428,7 @@ impl<'a> Syncer<'a> {
             vec![io_imap::types::fetch::MessageDataItemName::Flags].try_into()?
         );
 
-        let fetched = self.client.fetch(sequence_set, fetch_items, true)?;
+        let fetched = self.client.fetch(sequence_set, fetch_items)?;
         println!("  Checking flags for {} messages", fetched.len());
 
         let mut updates = Vec::new();
