@@ -102,15 +102,10 @@ impl ImapClient {
         &mut self,
         mailbox: Mailbox<'static>,
     ) -> Result<SelectData, Box<dyn std::error::Error>> {
-        use io_imap::codec::CommandCodec;
-        use io_imap::coroutines::send::{SendImapCommand, SendImapCommandResult};
-        use io_imap::types::command::{Command, CommandBody};
-        use io_imap::types::response::{Code, Data, StatusBody, StatusKind};
-
         let mut arg = None;
         let context = std::mem::replace(&mut self.context, ImapContext::new());
-
         let mut coroutine = ImapSelect::new(context, mailbox);
+
         loop {
             match coroutine.resume(arg.take()) {
                 ImapSelectResult::Ok { context, data } => {
@@ -125,11 +120,6 @@ impl ImapClient {
                 },
             }
         }
-
-        let body = CommandBody::Select {
-            mailbox: mailbox.clone(),
-            parameters: Default::default(),
-        };
     }
 
     fn _fetch(

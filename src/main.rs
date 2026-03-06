@@ -1,11 +1,12 @@
 use clap::{Parser, Subcommand};
-use log::{info};
+use log::{info, debug};
 use env_logger;
 
 mod config;
 mod imap;
 mod cache;
 mod sync;
+mod display;
 
 #[derive(Parser)]
 #[command(name = "anmari")]
@@ -181,26 +182,7 @@ fn main() {
         }
     };
 
-    println!("Cache initialized");
-
-    // Test get_message with a real message
-    let uid = 1;
-    match cache.get_message(uid, "INBOX") {
-        Ok(Some(msg)) => {
-            println!("Found cached message:");
-            println!("  uid: {}", msg.uid);
-            println!("  folder: {}", msg.folder);
-            println!("  from: {}", msg.from_addr);
-            println!("  subject: {}", msg.subject);
-            println!("  flags: {}", msg.flags);
-        }
-        Ok(None) => {
-            println!("No message found with uid={} in INBOX", uid);
-        }
-        Err(e) => {
-            println!("Error querying message: {}", e);
-        }
-    }
+    info!("Cache initialized");
 
     // Test get_folder_state
     match cache.get_folder_state("INBOX") {
@@ -242,7 +224,8 @@ fn main() {
             }
         }
         Commands::Search { query } => {
-            info!("Search: {}", query);
+            let results = cache.search("INBOX", &query).ok().unwrap();
+            display::display_messages_table(&results, 20, false);
         }
         Commands::Tag { args } => {
             info!("Tag: {:?}", args);
