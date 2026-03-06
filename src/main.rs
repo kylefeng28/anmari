@@ -8,6 +8,7 @@ mod cache;
 mod sync;
 mod display;
 mod search;
+mod repl;
 
 #[derive(Parser)]
 #[command(name = "anmari")]
@@ -60,6 +61,15 @@ enum Commands {
     Folders,
 
     /// Apply local tags to messages matching a query
+    ///
+    /// Usage: tag [--] +tag1 -tag2 <query>
+    ///
+    /// Examples:
+    ///   tag +newsletter from:Instagram
+    ///   tag +important -inbox subject:meeting
+    ///   tag -- -spam +inbox from:boss
+    ///   tag -- -actionable +reference from:"Bank of America" subject:"transaction exceeds"
+    /// Note: Use -- before query if it starts with - to prevent option parsing.
     Tag {
         /// Tag operations and search query (e.g., +work -inbox from:boss)
         args: Vec<String>,
@@ -205,32 +215,28 @@ fn main() {
         }
     };
 
-    info!("Cache initialized");
-
-    // Test get_folder_state
-    match cache.get_folder_state("INBOX") {
-        Ok(Some(state)) => {
-            println!("\nFolder state for INBOX:");
-            println!("  uidvalidity: {}", state.uidvalidity);
-            println!("  highestmodseq: {}", state.highestmodseq);
-        }
-        Ok(None) => {
-            println!("\nNo folder state found for INBOX");
-        }
-        Err(e) => {
-            println!("\nError querying folder state: {}", e);
-        }
+    if let Err(e) = dispatch(cli.command, account, &cache) {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
     }
+}
 
-    match cli.command {
-        Commands::Sync { folder, all_folders, page_size, fallback, dry_run } => {
-            info!("Sync: folder={:?}, all_folders={}, page_size={}", 
-                     folder, all_folders, page_size);
+pub fn run_command(argv: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::try_parse_from(std::iter::once("anmari".to_string()).chain(argv))?;
 
+    let config = config::Config::load()?;
+    let account = config.get_account(0).ok_or("No accounts configured")?;
+    let cache = cache::EmailCache::new(0)?;
+
+    dispatch(cli.command, account, &cache)
+}
+
+fn dispatch(command: Commands, account: &config::Account, cache: &cache::EmailCache) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        Commands::Sync { folder, all_folders: _, page_size, fallback, dry_run } => {
             let mut client = init_imap_client(account);
-
             let folder_to_sync = folder.as_deref().unwrap_or("INBOX");
-            let mut syncer = sync::Syncer::new(&mut client, &cache);
+            let mut syncer = sync::Syncer::new(&mut client, cache);
 
             match syncer.sync_folder(folder_to_sync, fallback, page_size, dry_run) {
                 Ok(_) => info!("Sync completed successfully"),
@@ -238,15 +244,13 @@ fn main() {
             }
         }
         Commands::Search { query, limit, all } => {
-            let results = cache.search("INBOX", &query).ok().unwrap();
+            let results = cache.search("INBOX", &query)?;
             display::display_messages_table(&results, limit, all);
         }
         Commands::Tag { args } => {
-            debug!("Tag: {:?}", args);
-
             let mut tags_to_add = Vec::new();
             let mut tags_to_remove = Vec::new();
-            let mut query_parts = Vec::new();
+            let mut query_parts: Vec<&str> = Vec::new();
 
             for part in &args {
                 if let Some(tag) = part.strip_prefix('+') {
@@ -262,8 +266,8 @@ fn main() {
                 eprintln!("Error: No tags specified. Use +tag to add, -tag to remove");
             } else {
                 let query = query_parts.join(" ");
-                let results = cache.search("INBOX", &query).unwrap();
-                let count = cache.tag_messages(&results, &tags_to_add, &tags_to_remove).unwrap();
+                let results = cache.search("INBOX", &query)?;
+                let count = cache.tag_messages(&results, &tags_to_add, &tags_to_remove)?;
                 let add_str = if !tags_to_add.is_empty() { format!("+{}", tags_to_add.join(", +")) } else { String::new() };
                 let remove_str = if !tags_to_remove.is_empty() { format!("-{}", tags_to_remove.join(", -")) } else { String::new() };
                 println!("Tagged {} messages with {}", count, [add_str, remove_str].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" "));
@@ -310,7 +314,12 @@ fn main() {
             info!("Cleanup");
         }
         Commands::Repl => {
-            info!("REPL");
+            repl::run_repl();
+        }
+        Commands::Queue { .. } | Commands::Status | Commands::Apply { .. }
+        | Commands::Folders | Commands::Cleanup => {
+            eprintln!("Not yet implemented");
         }
     }
+    Ok(())
 }

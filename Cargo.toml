@@ -23,6 +23,7 @@ fast-rich = "0.3"
 shell-words = "1.1"
 chrono = "0.4"
 chrono-english = "0.1"
+rustyline = "14"
 
 # [package.metadata.patch]
 # crates = ["io-imap"]
