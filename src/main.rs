@@ -10,6 +10,8 @@ mod display;
 mod search;
 mod repl;
 
+use display::OutputFormat;
+
 #[derive(Parser)]
 #[command(name = "anmari")]
 #[command(about = "Email search and tagging system with cache and IMAP support", long_about = None)]
@@ -55,6 +57,10 @@ enum Commands {
         /// Show all results
         #[arg(short, long)]
         all: bool,
+
+        /// Output format
+        #[arg(long, default_value_t = OutputFormat::Table)]
+        output: OutputFormat,
     },
 
     /// List all folders/mailboxes
@@ -243,9 +249,12 @@ fn dispatch(command: Commands, account: &config::Account, cache: &cache::EmailCa
                 Err(e) => eprintln!("Sync error: {}", e),
             }
         }
-        Commands::Search { query, limit, all } => {
+        Commands::Search { query, limit, all, output } => {
             let results = cache.search("INBOX", &query)?;
-            display::display_messages_table(&results, limit, all);
+            match output {
+                OutputFormat::Json => display::display_messages_json(&results, limit, all),
+                OutputFormat::Table => display::display_messages_table(&results, limit, all),
+            }
         }
         Commands::Tag { args } => {
             let mut tags_to_add = Vec::new();

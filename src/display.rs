@@ -1,8 +1,26 @@
+use clap::{ValueEnum};
+use std::fmt;
 use fast_rich::prelude::*;
 use fast_rich::{
     table::ColumnWidth,
     style::{Style, Color},
 };
+
+#[derive(Debug, Clone, Default, ValueEnum)]
+pub enum OutputFormat {
+    #[default]
+    Table,
+    Json,
+}
+
+impl fmt::Display for OutputFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OutputFormat::Table => write!(f, "table"),
+            OutputFormat::Json => write!(f, "json"),
+        }
+    }
+}
 
 fn truncate(s: &str, max_chars: usize) -> String {
     // Check for chars().count() instead of len(), and slice using char_indices() instead of
@@ -14,6 +32,11 @@ fn truncate(s: &str, max_chars: usize) -> String {
     } else {
         s.to_string()
     }
+}
+
+pub fn display_messages_json(messages: &[crate::cache::CachedMessage], limit: usize, show_all: bool) {
+    let display_limit = if show_all { messages.len() } else { limit.min(messages.len()) };
+    println!("{}", serde_json::to_string_pretty(&messages[..display_limit]).unwrap());
 }
 
 pub fn display_messages_table(messages: &[crate::cache::CachedMessage], limit: usize, show_all: bool) {

@@ -2,7 +2,7 @@ use rusqlite::{Connection, Transaction, Result, params, OptionalExtension};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct CachedMessage {
     pub uid: u32,
     pub folder: String,
