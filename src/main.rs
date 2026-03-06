@@ -46,6 +46,14 @@ enum Commands {
     Search {
         /// Search query
         query: String,
+
+        /// Limit number of results
+        #[arg(short, long, default_value_t = 20)]
+        limit: usize,
+
+        /// Show all results
+        #[arg(short, long)]
+        all: bool,
     },
 
     /// List all folders/mailboxes
@@ -229,12 +237,37 @@ fn main() {
                 Err(e) => eprintln!("Sync error: {}", e),
             }
         }
-        Commands::Search { query } => {
+        Commands::Search { query, limit, all } => {
             let results = cache.search("INBOX", &query).ok().unwrap();
-            display::display_messages_table(&results, 20, false);
+            display::display_messages_table(&results, limit, all);
         }
         Commands::Tag { args } => {
-            info!("Tag: {:?}", args);
+            debug!("Tag: {:?}", args);
+
+            let mut tags_to_add = Vec::new();
+            let mut tags_to_remove = Vec::new();
+            let mut query_parts = Vec::new();
+
+            for part in &args {
+                if let Some(tag) = part.strip_prefix('+') {
+                    tags_to_add.push(tag.to_string());
+                } else if let Some(tag) = part.strip_prefix('-') {
+                    tags_to_remove.push(tag.to_string());
+                } else {
+                    query_parts.push(part.as_str());
+                }
+            }
+
+            if tags_to_add.is_empty() && tags_to_remove.is_empty() {
+                eprintln!("Error: No tags specified. Use +tag to add, -tag to remove");
+            } else {
+                let query = query_parts.join(" ");
+                let results = cache.search("INBOX", &query).unwrap();
+                let count = cache.tag_messages(&results, &tags_to_add, &tags_to_remove).unwrap();
+                let add_str = if !tags_to_add.is_empty() { format!("+{}", tags_to_add.join(", +")) } else { String::new() };
+                let remove_str = if !tags_to_remove.is_empty() { format!("-{}", tags_to_remove.join(", -")) } else { String::new() };
+                println!("Tagged {} messages with {}", count, [add_str, remove_str].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" "));
+            }
         }
         Commands::Queue { action } => {
             match action {

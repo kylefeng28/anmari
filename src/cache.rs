@@ -301,6 +301,7 @@ impl EmailCache {
     }
 
     pub fn tag_messages(&self, messages: &[CachedMessage], tags_to_add: &[String], tags_to_remove: &[String]) -> Result<usize> {
+        let tx = self.transaction()?;
         for msg in messages {
             for tag in tags_to_add {
                 self.add_tag(msg.uid, &msg.folder, tag)?;
@@ -309,6 +310,7 @@ impl EmailCache {
                 self.remove_tag(msg.uid, &msg.folder, tag)?;
             }
         }
+        tx.commit()?;
         Ok(messages.len())
     }
 
