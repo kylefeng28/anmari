@@ -6,3 +6,6 @@ mod imap;
 mod repl;
 mod search;
 mod sync;
+
+#[cfg(feature = "python")]
+mod pyo3;

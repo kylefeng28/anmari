@@ -59,10 +59,16 @@ fn get_db_path(account_index: usize) -> Result<PathBuf, Box<dyn std::error::Erro
     Ok(state_dir.join("anmari").join(format!("anmari_{}.db", account_index)))
 }
 
-impl EmailCache {
-    pub fn new(account_index: usize) -> Result<Self, Box<dyn std::error::Error>> {
-        let db_path = get_db_path(account_index)?;
+fn get_db_path_by_account(account: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let state_dir = dirs::state_dir()
+        .or(dirs::home_dir().map(|x| x.join(".local/state")));
+    let state_dir = state_dir.ok_or("Could not find state directory")?;
 
+    Ok(state_dir.join("anmari").join(format!("anmari_{}.db", account)))
+}
+
+impl EmailCache {
+    pub fn new_from_path(db_path: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
         // Create parent directory if it doesn't exist
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -72,6 +78,11 @@ impl EmailCache {
         let cache = Self { conn };
         cache.init_db()?;
         Ok(cache)
+    }
+
+    pub fn new(account_index: usize) -> Result<Self, Box<dyn std::error::Error>> {
+        let db_path = get_db_path(account_index)?;
+        Self::new_from_path(db_path)
     }
 
     fn init_db(&self) -> Result<()> {
