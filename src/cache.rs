@@ -92,6 +92,16 @@ impl EmailCache {
             CREATE INDEX IF NOT EXISTS idx_date ON messages(date);
             CREATE INDEX IF NOT EXISTS idx_folder ON messages(folder);
 
+            CREATE TABLE IF NOT EXISTS message_bodies (
+                uid INTEGER NOT NULL,
+                folder TEXT NOT NULL,
+                body TEXT NOT NULL,
+                fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (uid, folder),
+                FOREIGN KEY (uid, folder) REFERENCES messages(uid, folder) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_bodies_fetched_at ON message_bodies(fetched_at);
+
             CREATE TABLE IF NOT EXISTS folder_state (
                 folder TEXT PRIMARY KEY,
                 uidvalidity INTEGER NOT NULL,
@@ -340,6 +350,46 @@ impl EmailCache {
             )?;
         }
         Ok(())
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Message body operations
+    // ──────────────────────────────────────────────────────────────────────────────
+    pub fn has_body(&self, uid: u32, folder: &str) -> Result<bool> {
+        let mut stmt = self.conn.prepare(
+            "SELECT 1 FROM message_bodies WHERE uid = ? AND folder = ?"
+        )?;
+        Ok(stmt.exists(params![uid, folder])?)
+    }
+
+    pub fn get_body(&self, uid: u32, folder: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT body FROM message_bodies WHERE uid = ? AND folder = ?"
+        )?;
+        stmt.query_row(params![uid, folder], |row| row.get(0)).optional()
+    }
+
+    pub fn store_body(&self, uid: u32, folder: &str, body: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO message_bodies (uid, folder, body) VALUES (?, ?, ?)",
+            params![uid, folder, body],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_messages_without_bodies(&self, folder: &str, since_days: u32) -> Result<Vec<u32>> {
+        let cutoff_date = chrono::Utc::now() - chrono::Duration::days(since_days as i64);
+        let cutoff_str = cutoff_date.format("%Y-%m-%d %H:%M:%S").to_string();
+
+        let mut stmt = self.conn.prepare(
+            "SELECT m.uid FROM messages m
+             LEFT JOIN message_bodies b ON m.uid = b.uid AND m.folder = b.folder
+             WHERE m.folder = ? AND m.date >= ? AND b.uid IS NULL
+             ORDER BY m.uid"
+        )?;
+
+        let rows = stmt.query_map(params![folder, cutoff_str], |row| row.get(0))?;
+        rows.collect()
     }
 
     // ──────────────────────────────────────────────────────────────────────────────

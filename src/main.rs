@@ -244,7 +244,7 @@ fn dispatch(command: Commands, account: &config::Account, cache: &cache::EmailCa
             let folder_to_sync = folder.as_deref().unwrap_or("INBOX");
             let mut syncer = sync::Syncer::new(&mut client, cache);
 
-            match syncer.sync_folder(folder_to_sync, fallback, page_size, dry_run) {
+            match syncer.sync_folder(folder_to_sync, account.cache_days, fallback, page_size, dry_run) {
                 Ok(_) => info!("Sync completed successfully"),
                 Err(e) => eprintln!("Sync error: {}", e),
             }

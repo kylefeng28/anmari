@@ -133,6 +133,7 @@ impl<'a> Syncer<'a> {
     pub fn sync_folder(
         &mut self,
         folder: &str,
+        cache_days: u32,
         use_fallback: bool,
         page_size: usize,
         dry_run: bool,
@@ -183,13 +184,16 @@ impl<'a> Syncer<'a> {
             dry_run,
         )?;
 
+        // Step 4: Fetch message bodies for recent messages
+        let total_bodies = self.sync_message_bodies(folder, cache_days, page_size, dry_run)?;
+
         // Update cached folder state
         if !dry_run {
             self.cache.set_folder_state(folder, uidvalidity, highestmodseq)?;
         }
 
-        println!("\n=== Sync complete: New: {}, Updated: {}, Expunged: {} ===", 
-                 total_new, total_updated, total_expunged);
+        println!("\n=== Sync complete: New: {}, Updated: {}, Expunged: {}, Bodies: {} ===", 
+                 total_new, total_updated, total_expunged, total_bodies);
         Ok(())
     }
 
@@ -311,7 +315,7 @@ impl<'a> Syncer<'a> {
     // Returns a lazy iterator of fetched pages
     fn fetch_new_messages_page(
         &mut self,
-        folder: &str,
+        _folder: &str,
         last_seen_uid: u32,
         page_size: usize,
     ) -> Box<dyn Iterator<Item=Result<Vec<NewMessage>, Box<dyn std::error::Error>>> + '_> {
@@ -402,7 +406,7 @@ impl<'a> Syncer<'a> {
     /// RFC 4549 Section 6.1: Use CONDSTORE / HIGHESTMODSEQ for efficient sync
     fn fetch_flag_updates_changedsince(
         &mut self,
-        folder: &str,
+        _folder: &str,
         cached_highestmodseq: u64,
     ) -> Result<Vec<FlagUpdate>, Box<dyn std::error::Error>> {
         println!("Step 2: Using CONDSTORE CHANGEDSINCE to fetch changes since MODSEQ {}", cached_highestmodseq);
@@ -497,5 +501,85 @@ impl<'a> Syncer<'a> {
         }
 
         Ok(expunged)
+    }
+
+    fn sync_message_bodies(
+        &mut self,
+        folder: &str,
+        cache_days: u32,
+        page_size: usize,
+        dry_run: bool,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        println!("Step 4: Fetching message bodies for recent messages (last {} days)", cache_days);
+
+        let uids_without_bodies = self.cache.get_messages_without_bodies(folder, cache_days)?;
+
+        if uids_without_bodies.is_empty() {
+            return Ok(0);
+        }
+
+        println!("  Fetching {} message bodies...", uids_without_bodies.len());
+
+        let prefix = if dry_run { "[DRY RUN] " } else { "" };
+        let mut total_fetched = 0;
+
+        // Fetch bodies in pages
+        for (page_num, chunk) in uids_without_bodies.chunks(page_size).enumerate() {
+            println!("  Fetching page {} ({} messages)", page_num, chunk.len());
+
+            let uid_strings: Vec<String> = chunk.iter().map(|u| u.to_string()).collect();
+            let sequence_set = SequenceSet::try_from(uid_strings.join(",").as_str())?;
+
+            // Fetch BODY.PEEK[TEXT] for the message bodies
+            use io_imap::types::fetch::Section;
+            let items = MacroOrMessageDataItemNames::MessageDataItemNames(vec![
+                io_imap::types::fetch::MessageDataItemName::Uid,
+                io_imap::types::fetch::MessageDataItemName::BodyExt {
+                    section: Some(Section::Text(None)),
+                    partial: None,
+                    peek: true,
+                },
+            ].try_into()?);
+
+            let responses = self.client.fetch(sequence_set, items)?;
+
+            let tx = self.cache.transaction()?;
+            for (_seq, response) in responses {
+                if let Some((uid, body)) = Self::extract_body_from_response(response) {
+                    if !dry_run {
+                        self.cache.store_body(uid, folder, &body)?;
+                    }
+                    total_fetched += 1;
+                }
+            }
+            tx.commit()?;
+            println!("  Page {}: Fetched {} new message bodies", page_num, chunk.len());
+            println!("  {}Added {} new message bodies to cache", prefix, chunk.len());
+        }
+
+        println!("Fetched {} total message bodies\n", total_fetched);
+        Ok(total_fetched)
+    }
+
+    fn extract_body_from_response(items: Vec1<MessageDataItem>) -> Option<(u32, String)> {
+        let mut uid = None;
+        let mut body = None;
+
+        for item in items.as_ref() {
+            match item {
+                MessageDataItem::Uid(_uid) => {
+                    uid = Some(_uid.get());
+                }
+                MessageDataItem::BodyExt { data, .. } => {
+                    // data is NString, which has .0 field that is Option<IString>
+                    if let Some(literal) = &data.0 {
+                        body = Some(String::from_utf8_lossy(literal.as_ref()).to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        uid.and_then(|u| body.map(|b| (u, b)))
     }
 }
