@@ -9,6 +9,7 @@ mod sync;
 mod display;
 mod search;
 mod repl;
+mod tantivy_search;
 
 use display::OutputFormat;
 
@@ -61,6 +62,10 @@ enum Commands {
         /// Output format
         #[arg(long, default_value_t = OutputFormat::Table)]
         output: OutputFormat,
+
+        /// Use full-text search (tantivy) instead of SQL
+        #[arg(long)]
+        fulltext: bool,
     },
 
     /// List all folders/mailboxes
@@ -242,18 +247,31 @@ fn dispatch(command: Commands, account: &config::Account, cache: &cache::EmailCa
         Commands::Sync { folder, all_folders: _, page_size, fallback, dry_run } => {
             let mut client = init_imap_client(account);
             let folder_to_sync = folder.as_deref().unwrap_or("INBOX");
-            let mut syncer = sync::Syncer::new(&mut client, cache);
+            let mut search_index = tantivy_search::SearchIndex::new(0)?;
+            let mut syncer = sync::Syncer::with_search_index(&mut client, cache, &mut search_index);
 
             match syncer.sync_folder(folder_to_sync, account.cache_days, fallback, page_size, dry_run) {
                 Ok(_) => info!("Sync completed successfully"),
                 Err(e) => eprintln!("Sync error: {}", e),
             }
         }
-        Commands::Search { query, limit, all, output } => {
-            let results = cache.search("INBOX", &query)?;
-            match output {
-                OutputFormat::Json => display::display_messages_json(&results, limit, all),
-                OutputFormat::Table => display::display_messages_table(&results, limit, all),
+        Commands::Search { query, limit, all, output, fulltext } => {
+            if fulltext {
+                let search_index = tantivy_search::SearchIndex::new(0)?;
+                let results = search_index.search(&query, if all { 10000 } else { limit })?;
+                
+                // Convert tantivy results to display format
+                println!("Found {} results (full-text search)", results.len());
+                for result in results.iter().take(if all { results.len() } else { limit }) {
+                    println!("UID: {} | {} | {} | {}", 
+                        result.uid, result.date, result.from_addr, result.subject);
+                }
+            } else {
+                let results = cache.search("INBOX", &query)?;
+                match output {
+                    OutputFormat::Json => display::display_messages_json(&results, limit, all),
+                    OutputFormat::Table => display::display_messages_table(&results, limit, all),
+                }
             }
         }
         Commands::Tag { args } => {

@@ -123,11 +123,20 @@ fn get_flags(flags: &Vec<FlagFetch>) -> Vec<String> {
 pub struct Syncer<'a> {
     client: &'a mut ImapClient,
     cache: &'a EmailCache,
+    search_index: Option<&'a mut crate::tantivy_search::SearchIndex>,
 }
 
 impl<'a> Syncer<'a> {
     pub fn new(client: &'a mut ImapClient, cache: &'a EmailCache) -> Self {
-        Self { client, cache }
+        Self { client, cache, search_index: None }
+    }
+
+    pub fn with_search_index(
+        client: &'a mut ImapClient,
+        cache: &'a EmailCache,
+        search_index: &'a mut crate::tantivy_search::SearchIndex,
+    ) -> Self {
+        Self { client, cache, search_index: Some(search_index) }
     }
 
     pub fn sync_folder(
@@ -225,13 +234,16 @@ impl<'a> Syncer<'a> {
         // Need to borrow cache as immutable here since fetch_new_messages_page() uses &mut self
         let cache = self.cache;
 
+        // Collect messages to index after fetching
+        let mut messages_to_index = Vec::new();
+
         // Fetch messages and update cache by page
         for page_result in self.fetch_new_messages_page(folder, last_seen_uid.unwrap_or(1), page_size) {
             let new_messages_page = page_result?;
 
             let mut page_new = 0;
             let tx = cache.transaction()?;
-            for msg in new_messages_page {
+            for msg in &new_messages_page {
                 if let None = cache.get_message(msg.uid, folder)? {
                     if !dry_run {
                         cache.insert_message(
@@ -243,14 +255,38 @@ impl<'a> Syncer<'a> {
                             &msg.date,
                             &msg.flags,
                         )?;
+                        
+                        // Collect for indexing later
+                        messages_to_index.push(msg.clone());
                     }
                     page_new += 1;
                 }
             }
             total_new += page_new;
             tx.commit()?;
+            
             println!("  {}Added {} new messages to cache", prefix, page_new);
         }
+        
+        // Index all collected messages in tantivy
+        if !dry_run && !messages_to_index.is_empty() {
+            if let Some(ref mut index) = self.search_index {
+                for msg in &messages_to_index {
+                    index.index_message(
+                        msg.uid,
+                        folder,
+                        &msg.from_addr,
+                        msg.from_name.as_deref(),
+                        &msg.subject,
+                        &msg.date,
+                        None, // body will be indexed separately
+                    )?;
+                }
+                index.commit()?;
+                println!("  Indexed {} messages in search index", messages_to_index.len());
+            }
+        }
+        
         println!();
         println!("Fetched {} new messages\n", total_new);
 
@@ -544,17 +580,40 @@ impl<'a> Syncer<'a> {
             let responses = self.client.fetch(sequence_set, items)?;
 
             let tx = self.cache.transaction()?;
+            let mut bodies_to_index = Vec::new();
             for (_seq, response) in responses {
                 if let Some((uid, body)) = Self::extract_body_from_response(response) {
                     if !dry_run {
                         self.cache.store_body(uid, folder, &body)?;
+                        bodies_to_index.push((uid, body));
                     }
                     total_fetched += 1;
                 }
             }
             tx.commit()?;
-            println!("  Page {}: Fetched {} new message bodies", page_num, chunk.len());
-            println!("  {}Added {} new message bodies to cache", prefix, chunk.len());
+            
+            // Update tantivy index with bodies
+            if !dry_run {
+                if let Some(ref mut index) = self.search_index {
+                    for (uid, body) in bodies_to_index {
+                        // Get message metadata from cache to re-index with body
+                        if let Some(msg) = self.cache.get_message(uid, folder)? {
+                            index.index_message(
+                                uid,
+                                folder,
+                                &msg.from_addr,
+                                msg.from_name.as_deref(),
+                                &msg.subject,
+                                &msg.date,
+                                Some(&body),
+                            )?;
+                        }
+                    }
+                    index.commit()?;
+                }
+            }
+            
+            println!("  {}Fetched {} message bodies", prefix, chunk.len());
         }
 
         println!("Fetched {} total message bodies\n", total_fetched);
