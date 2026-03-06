@@ -4,6 +4,18 @@ use fast_rich::{
     style::{Style, Color},
 };
 
+fn truncate(s: &str, max_chars: usize) -> String {
+    // Check for chars().count() instead of len(), and slice using char_indices() instead of
+    // s[..cut] since there might be a Unicode character (i.e. emoji)
+    if s.chars().count() > max_chars {
+        let cut = max_chars - 3;
+        let end = s.char_indices().nth(cut).map(|(i, _)| i).unwrap_or(s.len());
+        format!("{}...", &s[..end])
+    } else {
+        s.to_string()
+    }
+}
+
 pub fn display_messages_table(messages: &[crate::cache::CachedMessage], limit: usize, show_all: bool) {
     let console = Console::new();
     let mut table = Table::new();
@@ -23,11 +35,7 @@ pub fn display_messages_table(messages: &[crate::cache::CachedMessage], limit: u
             .filter(|n| !n.is_empty())
             .unwrap_or(&msg.from_addr);
 
-        let subject = if msg.subject.len() > 60 {
-            format!("{}...", &msg.subject[..57])
-        } else {
-            msg.subject.clone()
-        };
+        let subject = truncate(&msg.subject, 60);
 
         let date_str = if msg.date.len() >= 30 {
             &msg.date[..30]
@@ -49,5 +57,27 @@ pub fn display_messages_table(messages: &[crate::cache::CachedMessage], limit: u
 
     if messages.len() > display_limit {
         console.println(&format!("... and {} more", messages.len() - display_limit));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate;
+
+    #[test]
+    fn test_truncate_unicode_emoji() {
+        // Each emoji is multiple bytes; naive byte slicing at index 57 (💰) would panic
+        let s = "Cursor revenue leaks 📈, Anthropic risks $60B round 💰, Claude outage 💻";
+        let result = truncate(s, 60);
+        assert!(result.ends_with("..."));
+        assert!(result.chars().count() <= 60);
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+        assert_eq!(result, "Cursor revenue leaks 📈, Anthropic risks $60B round 💰, Cla...");
+    }
+
+    #[test]
+    fn test_truncate_short_string() {
+        let s = "short";
+        assert_eq!(truncate(s, 60), "short");
     }
 }
