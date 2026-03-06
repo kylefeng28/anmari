@@ -141,7 +141,7 @@ impl<'a> Syncer<'a> {
 
         // Select the folder
         let mailbox = Mailbox::try_from(folder.to_string())?;
-        let select_data = self.client.select(mailbox)?;
+        let select_data = self.client.select_readonly(mailbox)?;
 
         let uidvalidity = select_data.uid_validity.map(|u| u.get()).unwrap_or(0);
         let highestmodseq = select_data.highest_mod_seq.map(|u| u.get()).unwrap_or(0);
@@ -253,7 +253,7 @@ impl<'a> Syncer<'a> {
         let last_seen_uid = match last_seen_uid {
             Some(uid) => uid,
             None => {
-                println!("  (Initial sync, skipping flag update and expunged check)");
+                println!("(Initial sync, skipping flag update and expunged check)");
                 return Ok((total_new, 0, 0))
             },
         };

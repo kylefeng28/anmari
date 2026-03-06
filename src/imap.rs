@@ -101,10 +101,15 @@ impl ImapClient {
     pub fn select(
         &mut self,
         mailbox: Mailbox<'static>,
+        read_only: bool,
     ) -> Result<SelectData, Box<dyn std::error::Error>> {
         let mut arg = None;
         let context = std::mem::replace(&mut self.context, ImapContext::new());
-        let mut coroutine = ImapSelect::new(context, mailbox);
+        let mut coroutine = if read_only {
+            ImapSelect::read_only(context, mailbox)
+        } else {
+            ImapSelect::new(context, mailbox)
+        };
 
         loop {
             match coroutine.resume(arg.take()) {
@@ -120,6 +125,13 @@ impl ImapClient {
                 },
             }
         }
+    }
+
+    pub fn select_readonly(
+        &mut self,
+        mailbox: Mailbox<'static>,
+    ) -> Result<SelectData, Box<dyn std::error::Error>> {
+        self.select(mailbox, true)
     }
 
     fn _fetch(
