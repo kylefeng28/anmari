@@ -217,6 +217,7 @@ impl<'a> Syncer<'a> {
 
         // Step 1: Fetch new messages
         let mut total_new = 0;
+        // Need to borrow cache as immutable here since fetch_new_messages_page() uses &mut self
         let cache = self.cache;
         for page_result in self.fetch_new_messages_page(folder, last_seen_uid, page_size) {
             let new_messages_page = page_result?;
@@ -224,6 +225,7 @@ impl<'a> Syncer<'a> {
 
             // Update cache
             let mut total_new_cache = 0;
+            let tx = cache.transaction()?;
             for msg in new_messages_page {
                 if !dry_run {
                     cache.insert_message(
@@ -238,6 +240,7 @@ impl<'a> Syncer<'a> {
                 }
                 total_new_cache += 1;
             }
+            tx.commit()?;
             println!("{}Added {} messages to cache", prefix, total_new_cache);
         }
         println!("  Fetched {} new messages\n", total_new);
@@ -259,6 +262,7 @@ impl<'a> Syncer<'a> {
         println!();
 
         let mut total_updated_cache = 0;
+        let tx = self.cache.transaction()?;
         for flag_update in flag_updates {
             if !dry_run {
                 self.cache.update_message_flags(
@@ -269,18 +273,21 @@ impl<'a> Syncer<'a> {
             }
             total_updated_cache += 1;
         }
+        tx.commit()?;
         println!("{}Updated {} messages in cache", prefix, total_updated_cache);
 
         let mut total_expunged_cache = 0;
+        let tx = cache.transaction()?;
         for expunged_uid in expunged_uids {
             if !dry_run {
-                self.cache.delete_message(
+                cache.delete_message(
                     expunged_uid,
                     folder,
                 )?;
             }
             total_expunged_cache += 1;
         }
+        tx.commit()?;
         println!("{}Deleted {} messages in cache", prefix, total_expunged_cache);
 
         println!();

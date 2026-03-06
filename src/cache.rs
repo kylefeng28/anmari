@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Result, params, OptionalExtension};
+use rusqlite::{Connection, Transaction, Result, params, OptionalExtension};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 
@@ -221,6 +221,11 @@ impl EmailCache {
             params![uid, folder, from_addr, from_name, subject, date, flags_str],
         )?;
         Ok(())
+    }
+
+    /// IMPORTANT: make sure to call .commit() on the transaction object returned
+    pub fn transaction(&self) -> Result<Transaction<'_>> {
+        self.conn.unchecked_transaction()
     }
 
     pub fn delete_message(&self, uid: u32, folder: &str) -> Result<()> {
