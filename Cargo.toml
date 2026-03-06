@@ -20,6 +20,9 @@ log = "0.4.29"
 env_logger = "0.11.9"
 rfc2047-decoder = "1.1.0"
 fast-rich = "0.3"
+shell-words = "1.1"
+chrono = "0.4"
+chrono-english = "0.1"
 
 # [package.metadata.patch]
 # crates = ["io-imap"]

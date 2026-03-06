@@ -69,12 +69,12 @@ impl EmailCache {
         }
 
         let conn = Connection::open(&db_path)?;
-        let mut cache = Self { conn };
+        let cache = Self { conn };
         cache.init_db()?;
         Ok(cache)
     }
 
-    fn init_db(&mut self) -> Result<()> {
+    fn init_db(&self) -> Result<()> {
         self.conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS messages (
@@ -344,21 +344,25 @@ impl EmailCache {
     // Search
     // ──────────────────────────────────────────────────────────────────────────────
     pub fn search(&self, folder: &str, query: &str) -> Result<Vec<CachedMessage>> {
-        // Simple search implementation - just search in subject and from_addr
-        // For now, we'll do a basic LIKE search. Full query parsing can be added later.
-        let search_pattern = format!("%{}%", query);
+        let parsed = crate::search::parse_search_query(query);
 
-        let mut stmt = self.conn.prepare(
-            "SELECT uid, folder, from_addr, from_name, subject, date, flags
-             FROM messages
-             WHERE folder = ? AND (subject LIKE ? OR from_addr LIKE ?)
-             ORDER BY date DESC"
-        )?;
+        let sql = format!(
+            "SELECT m.uid, m.folder, m.from_addr, m.from_name, m.subject, m.date, m.flags
+             FROM messages m
+             {}
+             WHERE m.folder = ? AND ({})
+             ORDER BY m.date DESC",
+            parsed.join_clauses, parsed.conditions
+        );
 
-        let rows = stmt.query_map(
-            params![folder, search_pattern, search_pattern],
-            CachedMessage::from_row,
-        )?;
+        let mut stmt = self.conn.prepare(&sql)?;
+
+        let mut all_params: Vec<&dyn rusqlite::ToSql> = vec![&folder];
+        for p in &parsed.params {
+            all_params.push(p);
+        }
+
+        let rows = stmt.query_map(rusqlite::params_from_iter(all_params), CachedMessage::from_row)?;
 
         rows.collect()
     }

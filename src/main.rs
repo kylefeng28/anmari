@@ -7,6 +7,7 @@ mod imap;
 mod cache;
 mod sync;
 mod display;
+mod search;
 
 #[derive(Parser)]
 #[command(name = "anmari")]
@@ -149,6 +150,20 @@ enum QueueAction {
     },
 }
 
+fn init_imap_client(account: &config::Account) -> imap::ImapClient {
+    let client = match imap::ImapClient::connect(account) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error connecting to IMAP: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    client.print_status_debug();
+
+    client
+}
+
 fn main() {
     let cli = Cli::parse();
     env_logger::init();
@@ -199,21 +214,12 @@ fn main() {
         }
     }
 
-    // Connect to IMAP
-    let mut client = match imap::ImapClient::connect(account) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Error connecting to IMAP: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    client.print_status_debug();
-
     match cli.command {
         Commands::Sync { folder, all_folders, page_size, fallback, dry_run } => {
             info!("Sync: folder={:?}, all_folders={}, page_size={}", 
                      folder, all_folders, page_size);
+
+            let mut client = init_imap_client(account);
 
             let folder_to_sync = folder.as_deref().unwrap_or("INBOX");
             let mut syncer = sync::Syncer::new(&mut client, &cache);
