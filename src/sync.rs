@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-
 use std::num::NonZeroU32;
 use io_imap::{
     types::{
@@ -58,7 +57,11 @@ impl NewMessage {
                     };
 
                     let date = env.date.0.as_ref()
-                        .map(|d| String::from_utf8_lossy(d.as_ref()).to_string())
+                        .and_then(|d| {
+                            let s = String::from_utf8_lossy(d.as_ref());
+                            chrono::DateTime::parse_from_rfc2822(s.trim()).ok()
+                        })
+                        .map(|dt| dt.with_timezone(&chrono::Utc).format("%Y-%m-%d %H:%M:%S").to_string())
                         .unwrap_or_else(|| "1970-01-01 00:00:00".to_string());
 
                     envelope_data = Some((from_addr, from_name, subject, date));
@@ -206,8 +209,6 @@ impl<'a> Syncer<'a> {
                 cached_highestmodseq, current_highestmodseq);
         }
 
-        let last_seen_uid = last_seen_uid.unwrap_or(1);
-
         let prefix = if dry_run {
             println!("[DRY RUN - not updating cache]");
             "[DRY RUN] "
@@ -219,31 +220,43 @@ impl<'a> Syncer<'a> {
         let mut total_new = 0;
         // Need to borrow cache as immutable here since fetch_new_messages_page() uses &mut self
         let cache = self.cache;
-        for page_result in self.fetch_new_messages_page(folder, last_seen_uid, page_size) {
-            let new_messages_page = page_result?;
-            total_new += new_messages_page.len();
 
-            // Update cache
-            let mut total_new_cache = 0;
+        // Fetch messages and update cache by page
+        for page_result in self.fetch_new_messages_page(folder, last_seen_uid.unwrap_or(1), page_size) {
+            let new_messages_page = page_result?;
+
+            let mut page_new = 0;
             let tx = cache.transaction()?;
             for msg in new_messages_page {
-                if !dry_run {
-                    cache.insert_message(
-                        msg.uid,
-                        folder,
-                        &msg.from_addr,
-                        msg.from_name.as_deref(),
-                        &msg.subject,
-                        &msg.date,
-                        &msg.flags,
-                    )?;
+                if let None = cache.get_message(msg.uid, folder)? {
+                    if !dry_run {
+                        cache.insert_message(
+                            msg.uid,
+                            folder,
+                            &msg.from_addr,
+                            msg.from_name.as_deref(),
+                            &msg.subject,
+                            &msg.date,
+                            &msg.flags,
+                        )?;
+                    }
+                    page_new += 1;
                 }
-                total_new_cache += 1;
             }
+            total_new += page_new;
             tx.commit()?;
-            println!("{}Added {} messages to cache", prefix, total_new_cache);
+            println!("  {}Added {} new messages to cache", prefix, page_new);
         }
-        println!("  Fetched {} new messages\n", total_new);
+        println!();
+        println!("Fetched {} new messages\n", total_new);
+
+        let last_seen_uid = match last_seen_uid {
+            Some(uid) => uid,
+            None => {
+                println!("  (Initial sync, skipping flag update and expunged check)");
+                return Ok((total_new, 0, 0))
+            },
+        };
 
         // Step 2: Fetch flag changes to old messages
         let flag_updates = self.fetch_flag_updates(
@@ -253,13 +266,6 @@ impl<'a> Syncer<'a> {
             cached_highestmodseq,
             current_highestmodseq)?;
         let total_updated = flag_updates.len();
-
-        // Step 3: Detect expunged
-        let server_uids = self.get_server_uids(1, last_seen_uid)?;
-        let expunged_uids = self.detect_expunged_messages(folder, &server_uids)?;
-        let total_expunged = expunged_uids.len();
-
-        println!();
 
         let mut total_updated_cache = 0;
         let tx = self.cache.transaction()?;
@@ -275,6 +281,12 @@ impl<'a> Syncer<'a> {
         }
         tx.commit()?;
         println!("{}Updated {} messages in cache", prefix, total_updated_cache);
+        println!();
+
+        // Step 3: Detect expunged
+        let server_uids = self.get_server_uids(1, last_seen_uid)?;
+        let expunged_uids = self.detect_expunged_messages(folder, &server_uids)?;
+        let total_expunged = expunged_uids.len();
 
         let mut total_expunged_cache = 0;
         let tx = cache.transaction()?;
@@ -289,12 +301,13 @@ impl<'a> Syncer<'a> {
         }
         tx.commit()?;
         println!("{}Deleted {} messages in cache", prefix, total_expunged_cache);
-
         println!();
 
         Ok((total_new, total_updated, total_expunged))
     }
 
+    // Search for all UIDs greater than the last seen UID to get new messages
+    // IMAP command: UID FETCH <lastseenuid+1>:* (ENVELOPE)
     // Returns a lazy iterator of fetched pages
     fn fetch_new_messages_page(
         &mut self,
@@ -327,7 +340,9 @@ impl<'a> Syncer<'a> {
             return Box::new(std::iter::empty());
         }
 
-        println!("  Found {} new messages", new_uids.len());
+        let uid_min = new_uids.iter().min().unwrap();
+        let uid_max = new_uids.iter().max().unwrap();
+        println!("  Found {} new messages (ranging from {} to {})", new_uids.len(), uid_min, uid_max);
 
         // Convert chunks to owned Vec<Vec<NonZeroU32>> so we don't borrow new_uids
         let uid_pages: Vec<Vec<_>> = new_uids
