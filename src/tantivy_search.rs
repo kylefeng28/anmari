@@ -14,6 +14,7 @@ pub struct SearchIndex {
     from_name_field: Field,
     subject_field: Field,
     body_field: Field,
+    has_body_field: Field,
     date_field: Field,
 }
 
@@ -29,6 +30,7 @@ impl SearchIndex {
         let from_name_field = schema_builder.add_text_field("from_name", TEXT | STORED);
         let subject_field = schema_builder.add_text_field("subject", TEXT | STORED);
         let body_field = schema_builder.add_text_field("body", TEXT);
+        let has_body_field = schema_builder.add_bool_field("has_body", STORED | INDEXED);
         let date_field = schema_builder.add_text_field("date", STRING | STORED);
         let schema = schema_builder.build();
 
@@ -45,6 +47,7 @@ impl SearchIndex {
             from_name_field,
             subject_field,
             body_field,
+            has_body_field,
             date_field,
         })
     }
@@ -77,6 +80,7 @@ impl SearchIndex {
             self.from_addr_field => from_addr,
             self.subject_field => subject,
             self.date_field => date,
+            self.has_body_field => body.is_some(),
         );
 
         if let Some(name) = from_name {
@@ -158,7 +162,7 @@ impl SearchIndex {
     }
 
     /// Get UIDs of messages that don't have body text indexed
-    /// This checks if the body field is empty/missing for each document
+    /// Checks the has_body boolean field
     pub fn get_uids_without_bodies(&self, _folder: &str, all_uids: &[u32]) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
         let reader = self.index
             .reader_builder()
@@ -178,8 +182,10 @@ impl SearchIndex {
             if let Some((_score, doc_address)) = top_docs.first() {
                 let doc: tantivy::TantivyDocument = searcher.doc(*doc_address)?;
 
-                // Check if body field exists and has content
-                let has_body = doc.get_first(self.body_field).is_some();
+                // Check the has_body boolean field
+                let has_body = doc.get_first(self.has_body_field)
+                    .and_then(|v: &tantivy::schema::OwnedValue| v.as_bool())
+                    .unwrap_or(false);
 
                 if !has_body {
                     missing.push(uid);
