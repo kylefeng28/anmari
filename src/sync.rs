@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use std::num::NonZeroU32;
 use io_imap::{
     types::{
@@ -193,16 +193,19 @@ impl<'a> Syncer<'a> {
             dry_run,
         )?;
 
-        // Step 4: Fetch message bodies for recent messages
-        let total_bodies = self.sync_message_bodies(folder, cache_days, page_size, dry_run)?;
+        // Step 4a: Fetch message bodies for recent messages (store in SQLite)
+        let total_bodies_sqlite = self.sync_message_bodies_to_sqlite(folder, cache_days, page_size, dry_run)?;
+
+        // Step 4b: Fetch message bodies for ALL messages (index in tantivy only)
+        let total_bodies_tantivy = self.sync_message_bodies_to_tantivy(folder, page_size, dry_run)?;
 
         // Update cached folder state
         if !dry_run {
             self.cache.set_folder_state(folder, uidvalidity, highestmodseq)?;
         }
 
-        println!("\n=== Sync complete: New: {}, Updated: {}, Expunged: {}, Bodies: {} ===", 
-                 total_new, total_updated, total_expunged, total_bodies);
+        println!("\n=== Sync complete: New: {}, Updated: {}, Expunged: {}, Bodies (SQLite): {}, Bodies (Tantivy): {} ===", 
+                 total_new, total_updated, total_expunged, total_bodies_sqlite, total_bodies_tantivy);
         Ok(())
     }
 
@@ -255,7 +258,7 @@ impl<'a> Syncer<'a> {
                             &msg.date,
                             &msg.flags,
                         )?;
-                        
+
                         // Collect for indexing later
                         messages_to_index.push(msg.clone());
                     }
@@ -264,10 +267,10 @@ impl<'a> Syncer<'a> {
             }
             total_new += page_new;
             tx.commit()?;
-            
+
             println!("  {}Added {} new messages to cache", prefix, page_new);
         }
-        
+
         // Index all collected messages in tantivy
         if !dry_run && !messages_to_index.is_empty() {
             if let Some(ref mut index) = self.search_index {
@@ -286,7 +289,7 @@ impl<'a> Syncer<'a> {
                 println!("  Indexed {} messages in search index", messages_to_index.len());
             }
         }
-        
+
         println!();
         println!("Fetched {} new messages\n", total_new);
 
@@ -539,7 +542,26 @@ impl<'a> Syncer<'a> {
         Ok(expunged)
     }
 
-    fn sync_message_bodies(
+    fn fetch_message_body_page(&mut self, uid_strings: Vec<String>
+    ) -> Result<HashMap<NonZeroU32, Vec1<MessageDataItem<'static>>>, Box<dyn std::error::Error>>
+    {
+        let sequence_set = SequenceSet::try_from(uid_strings.join(",").as_str())?;
+
+        // Fetch BODY.PEEK[TEXT] for the message bodies
+        use io_imap::types::fetch::Section;
+        let items = MacroOrMessageDataItemNames::MessageDataItemNames(vec![
+            io_imap::types::fetch::MessageDataItemName::Uid,
+            io_imap::types::fetch::MessageDataItemName::BodyExt {
+                section: Some(Section::Text(None)),
+                partial: None,
+                peek: true,
+            },
+        ].try_into()?);
+
+        self.client.fetch(sequence_set, items)
+    }
+
+    fn sync_message_bodies_to_sqlite(
         &mut self,
         folder: &str,
         cache_days: u32,
@@ -564,20 +586,7 @@ impl<'a> Syncer<'a> {
             println!("  Fetching page {} ({} messages)", page_num, chunk.len());
 
             let uid_strings: Vec<String> = chunk.iter().map(|u| u.to_string()).collect();
-            let sequence_set = SequenceSet::try_from(uid_strings.join(",").as_str())?;
-
-            // Fetch BODY.PEEK[TEXT] for the message bodies
-            use io_imap::types::fetch::Section;
-            let items = MacroOrMessageDataItemNames::MessageDataItemNames(vec![
-                io_imap::types::fetch::MessageDataItemName::Uid,
-                io_imap::types::fetch::MessageDataItemName::BodyExt {
-                    section: Some(Section::Text(None)),
-                    partial: None,
-                    peek: true,
-                },
-            ].try_into()?);
-
-            let responses = self.client.fetch(sequence_set, items)?;
+            let responses = self.fetch_message_body_page(uid_strings)?;
 
             let tx = self.cache.transaction()?;
             let mut bodies_to_index = Vec::new();
@@ -591,7 +600,7 @@ impl<'a> Syncer<'a> {
                 }
             }
             tx.commit()?;
-            
+
             // Update tantivy index with bodies
             if !dry_run {
                 if let Some(ref mut index) = self.search_index {
@@ -612,11 +621,96 @@ impl<'a> Syncer<'a> {
                     index.commit()?;
                 }
             }
-            
+
             println!("  {}Fetched {} message bodies", prefix, chunk.len());
         }
 
         println!("Fetched {} total message bodies\n", total_fetched);
+        Ok(total_fetched)
+    }
+
+    fn sync_message_bodies_to_tantivy(
+        &mut self,
+        folder: &str,
+        page_size: usize,
+        dry_run: bool,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        // Only proceed if we have a search index
+        if self.search_index.is_none() {
+            return Ok(0);
+        }
+
+        println!("Step 4b: Fetching message bodies for tantivy index (all messages)");
+
+        // Get all UIDs in this folder from cache
+        let all_uids: Vec<u32> = self.cache.get_all_uids(folder)?
+            .iter()
+            .map(|uid| uid.get())
+            .collect();
+
+        if all_uids.is_empty() {
+            println!("  No messages in cache\n");
+            return Ok(0);
+        }
+
+        // Query tantivy to find which UIDs are missing body text
+        let uids_without_bodies = if let Some(ref index) = self.search_index {
+            index.get_uids_without_bodies(folder, &all_uids)?
+        } else {
+            return Ok(0);
+        };
+
+        if uids_without_bodies.is_empty() {
+            println!("  All messages already have bodies indexed\n");
+            return Ok(0);
+        }
+
+        println!("  Found {} messages without body text in tantivy", uids_without_bodies.len());
+
+        let prefix = if dry_run { "[DRY RUN] " } else { "" };
+        let mut total_fetched = 0;
+
+        // Fetch bodies in pages
+        for (page_num, chunk) in uids_without_bodies.chunks(page_size).enumerate() {
+            println!("  Fetching page {} ({} messages)", page_num, chunk.len());
+
+            let uid_strings: Vec<String> = chunk.iter().map(|u| u.to_string()).collect();
+            let responses = self.fetch_message_body_page(uid_strings)?;
+
+            // Index bodies in tantivy (do NOT store in SQLite)
+            let mut bodies_to_index = Vec::new();
+            for (_seq, response) in responses {
+                if let Some((uid, body)) = Self::extract_body_from_response(response) {
+                    bodies_to_index.push((uid, body));
+                    total_fetched += 1;
+                }
+            }
+
+            // Update tantivy index with bodies
+            if !dry_run {
+                if let Some(ref mut index) = self.search_index {
+                    for (uid, body) in bodies_to_index {
+                        // Get message metadata from cache to re-index with body
+                        if let Some(msg) = self.cache.get_message(uid, folder)? {
+                            index.index_message(
+                                uid,
+                                folder,
+                                &msg.from_addr,
+                                msg.from_name.as_deref(),
+                                &msg.subject,
+                                &msg.date,
+                                Some(&body),
+                            )?;
+                        }
+                    }
+                    index.commit()?;
+                }
+            }
+
+            println!("  {}Indexed {} message bodies in tantivy", prefix, chunk.len());
+        }
+
+        println!("{}Indexed {} total message bodies in tantivy\n", prefix, total_fetched);
         Ok(total_fetched)
     }
 

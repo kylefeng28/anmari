@@ -156,6 +156,42 @@ impl SearchIndex {
 
         Ok(results)
     }
+
+    /// Get UIDs of messages that don't have body text indexed
+    /// This checks if the body field is empty/missing for each document
+    pub fn get_uids_without_bodies(&self, _folder: &str, all_uids: &[u32]) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
+        let reader = self.index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            .try_into()?;
+        let searcher = reader.searcher();
+
+        let mut missing = Vec::new();
+
+        for &uid in all_uids {
+            // Search for this specific UID
+            let uid_term = Term::from_field_u64(self.uid_field, uid as u64);
+            let uid_query = tantivy::query::TermQuery::new(uid_term, tantivy::schema::IndexRecordOption::Basic);
+
+            let top_docs = searcher.search(&uid_query, &TopDocs::with_limit(1))?;
+
+            if let Some((_score, doc_address)) = top_docs.first() {
+                let doc: tantivy::TantivyDocument = searcher.doc(*doc_address)?;
+
+                // Check if body field exists and has content
+                let has_body = doc.get_first(self.body_field).is_some();
+
+                if !has_body {
+                    missing.push(uid);
+                }
+            } else {
+                // Document not in index at all
+                missing.push(uid);
+            }
+        }
+
+        Ok(missing)
+    }
 }
 
 #[derive(Debug)]
