@@ -129,6 +129,10 @@ class EmailCache:
         """)
         self.conn.commit()
 
+    def commit(self):
+        """Commit transaction"""
+        self.conn.commit()
+
     def get_message(self, uid: int, folder: str) -> Optional[CachedMessage]:
         """Get cached message"""
         _require_folder(folder)
@@ -140,7 +144,7 @@ class EmailCache:
         return CachedMessage.from_row(row) if row else None
 
     def insert_message(self, uid: int, folder: str, from_addr: str, from_name: Optional[str],
-                      subject: str, date: str, flags: str | list[str]):
+                      subject: str, date: str, flags: str | list[str], commit=True):
         """Insert or replace message"""
         _require_folder(folder)
         flags = normalize_flags_serialize(flags)
@@ -150,9 +154,10 @@ class EmailCache:
                VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?)""",
             (uid, folder, from_addr, from_name, subject, format_datetime_sqlite(date), flags)
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
-    def update_flags(self, uid: int, folder: str, flags: str | list[str]):
+    def update_flags(self, uid: int, folder: str, flags: str | list[str], commit=True):
         """Update message flags"""
         _require_folder(folder)
         flags = normalize_flags_serialize(flags)
@@ -160,18 +165,20 @@ class EmailCache:
             "UPDATE messages SET flags = ? WHERE uid = ? AND folder = ?",
             (flags, uid, folder)
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
-    def delete_message(self, uid: int, folder: str):
+    def delete_message(self, uid: int, folder: str, commit=True):
         """Delete message"""
         _require_folder(folder)
         self.conn.execute(
             "DELETE FROM messages WHERE uid = ? AND folder = ?",
             (uid, folder)
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
-    def copy_message(self, source_uid: int, source_folder: str, dest_uid: int, dest_folder: str):
+    def copy_message(self, source_uid: int, source_folder: str, dest_uid: int, dest_folder: str, commit=True):
         """Copy message from one folder to another (for MOVE optimization)
 
         This avoids re-downloading the message from the server after a move.
@@ -202,7 +209,8 @@ class EmailCache:
             (dest_uid, dest_folder, source_uid, source_folder)
         )
 
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         print(f'Copied message {source_uid} from {source_folder} to {dest_uid} in {dest_folder} (local cache)')
 
     def get_last_seen_uid(self, folder: str) -> Optional[int]:
@@ -279,23 +287,25 @@ class EmailCache:
         self.conn.commit()
 
     # Tag operations
-    def add_tag(self, uid: int, folder: str, tag: str):
+    def add_tag(self, uid: int, folder: str, tag: str, commit=True):
         """Add a tag to a message"""
         _require_folder(folder)
         self.conn.execute(
             "INSERT OR IGNORE INTO tags (uid, folder, tag) VALUES (?, ?, ?)",
             (uid, folder, tag)
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
-    def remove_tag(self, uid: int, folder: str, tag: str):
+    def remove_tag(self, uid: int, folder: str, tag: str, commit=True):
         """Remove a tag from a message"""
         _require_folder(folder)
         self.conn.execute(
             "DELETE FROM tags WHERE uid = ? AND folder = ? AND tag = ?",
             (uid, folder, tag)
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
     def get_tags(self, uid: int, folder: str) -> list[str]:
         """Get all tags for a message"""
@@ -319,16 +329,18 @@ class EmailCache:
         """
         for msg in messages:
             for tag in tags_to_add:
-                self.add_tag(msg.uid, msg.folder, tag)
+                self.add_tag(msg.uid, msg.folder, tag, commit=False)
 
             if tags_to_remove:
                 for tag in tags_to_remove:
-                    self.remove_tag(msg.uid, msg.folder, tag)
+                    self.remove_tag(msg.uid, msg.folder, tag, commit=False)
+
+        self.commit()
 
         return len(messages)
 
     # Gmail label operations
-    def set_gm_labels(self, uid: int, folder: str, labels: list[str]):
+    def set_gm_labels(self, uid: int, folder: str, labels: list[str], commit=True):
         """Set Gmail labels for a message (replaces existing labels)"""
         _require_folder(folder)
         # Clear existing labels
@@ -342,7 +354,8 @@ class EmailCache:
                 "INSERT OR IGNORE INTO gm_labels (uid, folder, label) VALUES (?, ?, ?)",
                 (uid, folder, label)
             )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
     def get_gm_labels(self, uid: int, folder: str) -> list[str]:
         """Get all Gmail labels for a message"""

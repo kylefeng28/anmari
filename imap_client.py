@@ -283,14 +283,16 @@ class EmailImapClient:
                         envelope.from_name,
                         envelope.subject,
                         envelope.date,
-                        flags)
+                        flags,
+                        commit=False)
 
                     # Store Gmail labels if available
                     if self.is_gmail and gm_labels is not None:
-                        self.cache.set_gm_labels(uid, folder, gm_labels)
+                        self.cache.set_gm_labels(uid, folder, gm_labels, commit=False)
 
                     new += 1
 
+            self.cache.commit()
             print(f'Added {new} new messages to cache')
             return new
 
@@ -307,7 +309,7 @@ class EmailImapClient:
                         print(f"  Old flags: {cached_flags}")
                         print(f"  New flags: {flags}")
 
-                        self.cache.update_flags(uid, folder, flags)
+                        self.cache.update_flags(uid, folder, flags, commit=False)
                         updated += 1
 
                     # Store Gmail labels if available
@@ -317,7 +319,7 @@ class EmailImapClient:
                             print(f'Updating Gmail labels for {uid} in cache')
                             print(f'  Old labels: {cached_gm_labels}')
                             print(f'  New labels: {gm_labels}')
-                            self.cache.set_gm_labels(uid, folder, gm_labels)
+                            self.cache.set_gm_labels(uid, folder, gm_labels, commit=False)
 
                 else:
                     click.echo(f"UID {uid} not found in cache!")
@@ -325,6 +327,7 @@ class EmailImapClient:
                     a = self.client.fetch([uid], 'BODY.PEEK[HEADER]')
                     print(a)
 
+            self.cache.commit()
             print(f'Updated {updated} messages in cache')
             return updated
 
@@ -356,9 +359,10 @@ class EmailImapClient:
 
             for uid in uids_to_expunge:
                 print(f"  Expunging UID {uid} (deleted on server)")
-                self.cache.delete_message(uid, folder)
+                self.cache.delete_message(uid, folder, commit=False)
                 total_expunged += 1
 
+            self.cache.commit()
             if total_expunged == 0:
                 print("  No expunged messages")
 
@@ -470,9 +474,10 @@ class EmailImapClient:
         i = 0
         try:
             for source_uid, dest_uid in uid_map.items():
-                self.cache.copy_message(source_uid, source_folder, dest_uid, dest_folder)
-                self.cache.delete_message(source_uid, source_folder)
+                self.cache.copy_message(source_uid, source_folder, dest_uid, dest_folder, commit=False)
+                self.cache.delete_message(source_uid, source_folder, commit=False)
                 i += 1
+            self.cache.commit()
             return i
         except Exception as e:
             print(e)
