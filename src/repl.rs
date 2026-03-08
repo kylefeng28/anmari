@@ -1,6 +1,8 @@
 use rustyline::{DefaultEditor, error::ReadlineError};
 use std::path::PathBuf;
 
+use crate::cli;
+
 pub fn run_repl() {
     let history_path = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -29,7 +31,7 @@ pub fn run_repl() {
 
                 match shell_words::split(&line) {
                     Ok(argv) if !argv.is_empty() => {
-                        if let Err(e) = crate::run_command(argv) {
+                        if let Err(e) = cli::run_command(argv) {
                             eprintln!("Error: {}", e);
                         }
                     }

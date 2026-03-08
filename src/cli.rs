@@ -2,13 +2,12 @@ use clap::{Parser, Subcommand};
 use log::{info, debug};
 use env_logger;
 
-mod config;
-mod imap;
-mod cache;
-mod sync;
-mod display;
-mod search;
-mod repl;
+use crate::cache;
+use crate::config;
+use crate::display;
+use crate::imap;
+use crate::repl;
+use crate::sync;
 
 use display::OutputFormat;
 
@@ -188,7 +187,7 @@ fn init_imap_client(account: &config::Account) -> imap::ImapClient {
     client
 }
 
-fn main() {
+pub fn cli() {
     let cli = Cli::parse();
     env_logger::init();
 
