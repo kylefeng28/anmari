@@ -18,15 +18,8 @@ macro_rules! forward_method {
     };
 
     ($self:ident, $method:ident($($arg:expr),*), $auto_commit:expr) => {{
-        // if auto_commit is false, we need to start an transaction
-        if !$auto_commit {
-            $self._start_transaction()?;
-            let result = forward_method!($self, $method($($arg),*))?;
-            Ok(result)
-        }
-        else {
-            forward_method!($self, $method($($arg),*))
-        }
+        $self._start_transaction_auto_commit($auto_commit)?;
+        forward_method!($self, $method($($arg),*))
 
     }};
 }
@@ -112,6 +105,13 @@ impl PyEmailCache {
         let tx = py_result!(self.cache.transaction())?;
         self.tx_ptr = Some(Box::into_raw(Box::new(tx)) as *const c_void);
         Ok(())
+    }
+
+    fn _start_transaction_auto_commit(&mut self, auto_commit: bool) -> PyResult<()> {
+        Ok(match self.tx_ptr {
+            Some(_) => self._start_transaction()?,
+            None => (),
+        })
     }
 
     fn commit(&mut self) -> PyResult<()> {
