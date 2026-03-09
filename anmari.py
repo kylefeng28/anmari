@@ -10,7 +10,8 @@ from datetime import datetime
 from email.utils import formataddr
 
 from config import AccountConfig
-from cache import EmailCache
+# from cache import EmailCache
+from cache_rs import EmailCache
 from imap_client import EmailImapClient
 from action_queue import ActionQueue, QueuedAction
 from sync_manager import SyncManager

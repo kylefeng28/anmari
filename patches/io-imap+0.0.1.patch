@@ -1,0 +1,71 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index ef586ae..5899cbe 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -12,7 +12,8 @@ documentation = "https://github.com/pimalaya/io-imap"
+ repository = "https://github.com/pimalaya/io-imap"
+ 
+ [features]
+-default = ["scram", "gssapi"]
++# default = ["scram", "gssapi"]
++default = ["scram"]
+ scram = ["dep:base64", "dep:hmac", "dep:pbkdf2", "dep:rand", "dep:sha2"]
+ gssapi = ["dep:libgssapi"]
+ 
+diff --git a/src/coroutines/fetch.rs b/src/coroutines/fetch.rs
+index 4499093..a996fde 100644
+--- a/src/coroutines/fetch.rs
++++ b/src/coroutines/fetch.rs
+@@ -4,7 +4,7 @@ use std::{collections::HashMap, num::NonZeroU32};
+ 
+ use imap_codec::{
+     imap_types::{
+-        command::{Command, CommandBody},
++        command::{Command, CommandBody, FetchModifier},
+         core::Vec1,
+         fetch::{MacroOrMessageDataItemNames, MessageDataItem},
+         response::{Data, StatusKind, Tagged},
+@@ -64,10 +64,11 @@ impl ImapFetch {
+         mut context: ImapContext,
+         sequence_set: SequenceSet,
+         macro_or_item_names: MacroOrMessageDataItemNames<'static>,
++        modifiers: Vec<FetchModifier>,
+         uid: bool,
+     ) -> Self {
+         let body = CommandBody::Fetch {
+-            modifiers: Default::default(),
++            modifiers,
+             sequence_set,
+             macro_or_item_names,
+             uid,
+diff --git a/src/coroutines/select.rs b/src/coroutines/select.rs
+index 75ef505..760c2d6 100644
+--- a/src/coroutines/select.rs
++++ b/src/coroutines/select.rs
+@@ -1,6 +1,6 @@
+ //! I/O-free coroutine to send an IMAP SELECT or EXAMINE command.
+ 
+-use std::num::NonZeroU32;
++use std::num::{NonZeroU32, NonZeroU64};
+ 
+ use imap_codec::{
+     imap_types::{
+@@ -46,6 +46,7 @@ pub struct SelectData {
+     pub permanent_flags: Option<Vec<FlagPerm<'static>>>,
+     pub uid_next: Option<NonZeroU32>,
+     pub uid_validity: Option<NonZeroU32>,
++    pub highest_mod_seq: Option<NonZeroU64>,
+ }
+ 
+ /// Output emitted when the coroutine terminates its progression.
+@@ -165,6 +166,10 @@ impl ImapSelect {
+                         Some(Code::UidValidity(uid)) => {
+                             output.uid_validity = Some(uid);
+                         }
++                        Some(Code::HighestModSeq(modseq)) => {
++                            output.highest_mod_seq = Some(modseq);
++                        }
++
+                         _ => {}
+                     }
+                 }
